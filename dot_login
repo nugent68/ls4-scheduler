@@ -1,0 +1,20 @@
+#!/bin/tcsh
+setenv FAKE_OBS 1
+setenv TRANSFER_FLAG 0
+setenv VERBOSE_FLAG 0
+setenv QUESTNEATDATADIR /data/ls4
+setenv LS4_ROOT /home/observer
+setenv LS4_CONTROL_ROOT $LS4_ROOT/ls4_control
+setenv LS4_SCHEDULER_ROOT $LS4_ROOT/scheduler
+setenv SCHEDULER_PROGRAM $LS4_SCHEDULER_ROOT/bin/scheduler
+setenv OBSPLAN_DIR $LS4_ROOT/obsplans
+
+setenv LOG_DIR $LS4_ROOT/logs
+setenv CCP_LOG_LEVEL "INFO"
+setenv CCP_LOG $LOG_DIR/ccp.log
+setenv OFFSET_LOG $LOG_DIR/telescope_offsets.log
+setenv STARTOBS_LOG $LOG_DIR/startobs.log
+
+setenv CCP_HOST pco-nuc
+setenv CCP_PORT 5000
+setenv CCP_STATUS_PORT 5001

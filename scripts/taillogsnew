@@ -1,0 +1,8 @@
+#!/bin/csh 
+
+setenv TODAY `getdate -e`
+echo $TODAY
+setenv logdir "$QUESTDATA/$TODAY/logs"
+echo $logdir
+tail -f $logdir/logfile &
+tail -f $logdir/$TODAY.log &

@@ -1,0 +1,8 @@
+#!/bin/tcsh
+
+# resume 
+
+# send SIGUSR2 (signal 12) to scheduler
+
+slay 12 scheduler
+

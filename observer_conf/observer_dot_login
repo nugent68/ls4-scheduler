@@ -1,0 +1,81 @@
+#!/bin/tcsh
+# 
+# copy (or link) this file to $LS4_ROOT/.login
+# These environment variables are used by various
+# scripts that implement the startup of the
+# LS4 observing software.
+#
+# LS4_ROOT is the home directory for the "observer" user.
+# It is defined in ".tcshrc" in the observer home direcory.
+if ( ! $?LS4_ROOT ) then
+   echo "LS4_ROOT is not defined in ~/.tcshrc of observers home directory"
+   exit
+endif
+
+#
+# For simulated observations, set FAKE_OBS and FAKE_TELESCOPE to 1.
+# Otherwise, set to 0.
+setenv FAKE_OBS 1
+setenv FAKE_TELESCOPE 1
+
+if ( $FAKE_TELESCOPE ) then
+   setenv SITE_NAME "Fake"
+else
+   setenv SITE_NAME "ESO_SCHMIDT"
+endif
+
+# Set TRANSFER_FLAG to 1 package and transfer data as they are acquired.
+setenv TRANSFER_FLAG 0
+
+# Set VERBOSE_FLAG to 1 (or higher) for verbose message logs
+setenv VERBOSE_FLAG 1
+#
+# QUESTNEATDATADIR is where acquired observations are stored.
+if ( $FAKE_OBS ) then
+  setenv QUESTNEATDATADIR /data/observer/fake
+else
+  setenv QUESTNEATDATADIR /data/observer
+endif
+
+# LS4_CONTROL_ROOT is the location of the camera control code
+setenv LS4_CONTROL_ROOT $LS4_ROOT/ls4_control
+
+# LS4_SCHEDULER_ROOT is the locations of the scheduler code.
+setenv LS4_SCHEDULER_ROOT $LS4_ROOT/scheduler
+
+# SCHEDULER_PROGRAM is the directory path for the scheduler code
+setenv SCHEDULER_PROGRAM $LS4_SCHEDULER_ROOT/bin/scheduler
+
+# OBSPLAN_DIR is the directory where nightly obsplans are stored
+setenv OBSPLAN_DIR $LS4_ROOT/obsplans
+
+# LOG_DIR is the location where message logs are written.
+setenv LOG_DIR $LS4_ROOT/logs
+
+# CCP_LOG_LEVEL sets the message content of log for the camera control
+# program. Use "DEBUG" for more verbosity, "ERROR" for error-messages
+# only.
+setenv CCP_LOG_LEVEL "INFO"
+
+# CCP_LOG is the location for the camera-control log.
+setenv CCP_LOG $LOG_DIR/ccp.log
+
+# OFFSET_LOG is the file location for the output log
+# of the script that determines corrections to the telescope pointing.
+setenv OFFSET_LOG $LOG_DIR/telescope_offsets.log
+
+# STARTOBS_LOG is the file location for the output log of the
+# script that starts the nightly observing program.
+setenv STARTOBS_LOG $LOG_DIR/startobs.log
+
+# CCP_HOST the name of the machine that runs the camera-control program.
+setenv CCP_HOST ls4-workstn
+
+# CCP_PORT is the TCP port for socket connections to the camera-control
+# program
+setenv CCP_PORT 5000
+
+#  CCP_STATUS_PORT is the TCP port for status commands to the camera-control
+# program
+setenv CCP_STATUS_PORT 5001
+

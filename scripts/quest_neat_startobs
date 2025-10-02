@@ -1,0 +1,224 @@
+#!/bin/tcsh
+#
+# script for starting point&shoot scheduler
+#
+# syntax: quest_neat_startobs
+#
+# Program looks for directory "$OBSPLAN_DIR/$d"
+# where $d is the ut for the night (yyyymmdd) and also looks for
+# an obsplan named $d.obsplan there. If found, it kill any currently
+# running instances of the scheduler and of auxilary scripts to 
+# to transfer and analyze the image data. It then restarts
+# the camera control program. This creates a data directory
+# at $QUESTNEATDATADIR named with the ut date (yyyymmdd) and 
+# containing a subdirectory for logs. It then
+# copies the current observing script to that log directory, starts
+# the scheduler from that directory, and starts all the other
+# scripts. All the logs from the various scripts go the the log
+# subdirecory
+#
+# Note that restarting the scheduler by running "quest_neat_startobs"
+# will resume operations where it left off by reading a binary
+# record of the previous observations ( "scheduler.bin" in the log
+# subdirectory). To restart at the beginning of the obs script,
+# use "quest_neat_startobs new".
+# 
+# To stop the scheduler and shut down the camera, use 
+# "quest_neat_startobs stop"
+#
+set RECIPIENTS = "david.rabinowitz@yale.edu"
+unalias rm
+
+set resume_flag = 1
+set stop_flag = 0
+
+if ( $#argv == 0 ) then
+  set resume_flag = 1
+else if ( $#argv == 1 ) then
+  if ( $argv[1] == "new" ) then
+     set resume_flag = 0
+  else if ( $argv[1] == stop ) then
+     set stop_flag = 1 
+  else
+     echo "syntax: quest_neat_startobs [new or stop]"
+     exit
+  endif
+else
+  echo "syntax: quest_neat_startobs [new or stop]"
+  exit
+endif
+#
+#
+
+source $LS4_ROOT/.login
+unalias cp
+set d = `get_ut_date`
+set d0 = `echo $d | cut -c 1-8`
+#
+set TEMP_FILE = "/tmp/quest_neat_startobs.tmp"
+set SCRIPTDIR = "$OBSPLAN_DIR/$d0"
+set SCRIPT = "$SCRIPTDIR/$d0.obsplan"
+set SCRIPT_LOG = "$d.log"
+#set OFFSET_FILE = "$LS4_ROOT/telescope_offsets.dat"
+#set OFFSET_LOG = "$LS4_ROOT/logs/telescope_offsets.log"
+#set STARTOBS_LOG = "$LS4_ROOT/logs/startobs.log"
+#set SCHEDULER_PROGRAM = "$LS4_ROOT/bin/scheduler"
+#set VERBOSE_FLAG = 0
+set HOUR_LIMIT = 24
+#
+if ( ! -e $QUESTNEATDATADIR ) then
+   echo "ERROR: can't find QUESTNEATDATADIR at $QUESTNEATDATADIR"
+   exit
+endif
+
+if ( ! -e $QUESTNEATDATADIR/$d ) then
+   echo "WARNING: can't find subdirectory [$d]  at $QUESTNEATDATADIR"
+   mkdir $QUESTNEATDATADIR/$d
+endif
+
+if ( ! -e $QUESTNEATDATADIR/$d/logs ) then
+   echo "WARNING: can't find subdirectory [$d/logs]  at $QUESTNEATDATADIR"
+   mkdir $QUESTNEATDATADIR/$d/logs
+endif
+
+set data_path = $QUESTNEATDATADIR/$d
+set log_dir = $QUESTNEATDATADIR/$d/logs
+#
+if ( ! -e $STARTOBS_LOG ) touch $STARTOBS_LOG
+date >> $STARTOBS_LOG
+
+echo "" >> $STARTOBS_LOG
+if ( $stop_flag ) then
+   echo "stopping ongoing observations" >> $STARTOBS_LOG
+   $LS4_ROOT/bin/restart_ccp stop >> $STARTOBS_LOG
+endif
+
+
+echo "slaying any ongoing realtime_transfer" >> $STARTOBS_LOG
+slay realtime_transfer >>& $STARTOBS_LOG
+slay quest_neat_transfer >>& $STARTOBS_LOG
+#
+echo "slaying any ongoing qa script" >> $STARTOBS_LOG
+slay quest_neat_qa >>& $STARTOBS_LOG
+
+#
+echo "killing any ongoing scheduler" >>& $STARTOBS_LOG
+slay scheduler >>& $STARTOBS_LOG
+#
+if ( $stop_flag ) then
+   echo "done stopping observation program" >> $STARTOBS_LOG
+   exit
+endif
+
+if ( $resume_flag == 0 ) then
+   echo "starting with new obsplan" >> $STARTOBS_LOG
+else
+   if ( -e $log_dir/scheduler.bin ) then
+      echo "resuming pre-existing obsplan" >> $STARTOBS_LOG
+   endif
+endif
+#
+if ( ! -e $SCRIPT ) then
+   echo "can't find tonight's script at $SCRIPT" >> $STARTOBS_LOG
+   echo "can't find tonight's script at $SCRIPT" 
+
+#  if local time hour is less than HOUR_LIMIT, set up an at job to check again
+#  for tonight's script 30 minutes from now
+   set h = `date +"%H"`
+   if ( $h < 6 ) then
+       @ h = $h + 24
+   endif
+   if ( $h < $HOUR_LIMIT ) then
+       echo "rechecking in 30 minutes" >> $STARTOBS_LOG
+       at -f "$LS4_ROOT/bin/quest_neat_startobs" now + 30 minutes
+   else
+       echo " couldn't find obsplan. Giving up at  `date`" >> $STARTOBS_LOG
+   endif
+#   mail -s "quest_neat_startobs: no script for $d0" david.rabinowitz@yale.edu < $STARTOBS_LOG
+   printf "Subject: quest_neat_startobs: no script for $d0\n" >! $TEMP_FILE
+   printf "\n" >> $TEMP_FILE
+   cat $STARTOBS_LOG >> $TEMP_FILE
+   printf "\n" >> $TEMP_FILE
+#  cat $TEMP_FILE | sendmail -fdavid.rabinowitz@yale.edu $RECIPIENTS
+
+   exit
+endif
+#
+
+
+echo "restarting ccp " >> $STARTOBS_LOG
+$LS4_ROOT/bin/restart_ccp $data_path >>& $STARTOBS_LOG
+echo "done restarting ccp" >> $STARTOBS_LOG
+#
+echo "checking if $log_dir exists" >>& $STARTOBS_LOG
+if ( ! -e $log_dir ) then
+   echo "can't find $log_dir" >> $STARTOBS_LOG
+   exit
+endif
+#
+
+#echo "testing quest_neatsrv" >> $STARTOBS_LOG
+#echo "s" | ~/palomar/scripts/quest_neatclient.pl >>& $STARTOBS_LOG
+#
+
+#echo "updating filter log:" >>& $STARTOBS_LOG
+#update_filter_log
+#tail -n 1 $FILTERLOG >> $STARTOBS_LOG
+#
+#
+echo "copying $SCRIPT to $log_dir" >> $STARTOBS_LOG
+cp $SCRIPT $log_dir
+echo "changing to to $log_dir" >> $STARTOBS_LOG
+cd $log_dir
+
+#  echo "copying observing script to ~guest" >> $STARTOBS_LOG
+#  if ( -e ~/bin/copy_script) ~/bin/copy_script
+#
+if ( ! $FAKE_OBS ) then
+echo "adding telescope offsets to offset log"
+if ( -e $OFFSET_FILE ) then
+      set l = `cat $OFFSET_FILE`
+      echo "$d $l" >> $OFFSET_LOG
+endif
+endif
+#
+#
+if ( $resume_flag == 0 ) then
+  echo "erasing previous log history" >> $STARTOBS_LOG
+  if ( -e $log_dir/scheduler.bin ) then
+     rm $log_dir/scheduler.bin
+  endif
+endif
+#
+echo "starting scheduler" >> $STARTOBS_LOG
+set d_local = `get_ut_date local`
+set dy = `echo $d_local | cut -c 1-4`
+set dm = `echo $d_local | cut -c 5-6`
+set dd = `echo $d_local | cut -c 7-8`
+if ( $FAKE_OBS ) then
+  @ dd = $dd - 1
+endif
+set date_string = "$dy $dm $dd"
+echo "starting scheduler for date $date_string"
+echo "$SCHEDULER_PROGRAM $SCRIPT $date_string  $VERBOSE_FLAG" >>& $STARTOBS_LOG
+$SCHEDULER_PROGRAM  $SCRIPT $date_string  $VERBOSE_FLAG >>& $SCRIPT_LOG  &
+#
+if ( ( ! $FAKE_OBS )  && $TRANSFER_FLAG ) then
+
+    echo "starting quest_neat_transfer.csh"
+    $PALOMARDIR/scripts/quest_neat_transfer.csh >& $REALTIME_TRANSFER_DIR/realtime_transfer.out &
+
+    echo "starting quest_neat_qa.csh"
+    $PALOMARDIR/scripts/quest_neat_qa.csh & 
+
+endif
+#
+echo "startobs finished" >> $STARTOBS_LOG
+#
+#mail -s "quest_neat_startobs: $d0 obs started" $RECIPIENTS  < $STARTOBS_LOG
+printf "Subject: quest_neat_startobs: $d0 obs started\n" >! $TEMP_FILE
+printf "\n" >> $TEMP_FILE
+cat $STARTOBS_LOG >> $TEMP_FILE
+printf "\n" >> $TEMP_FILE
+#cat $TEMP_FILE | sendmail -fdavid.rabinowitz@yale.edu $RECIPIENTS
+#

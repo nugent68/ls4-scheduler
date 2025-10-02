@@ -1,0 +1,59 @@
+# Environment variables for QUEST operations. They are now set in .login
+# so that gdb can run without reverting to the values in the .tcshrc. 
+# Instead it will inherit the values from the shell it has been invoked from.
+
+# Set variables for taking test or archive data
+# tcl checks datatype and uses appropriate dir
+
+setenv DATATYPE ARCHIVE
+#setenv DATATYPE TEST
+
+# set to 0 to keep real data from being written
+#setenv WRITE_TEST_PIX 0
+setenv WRITE_TEST_PIX 1
+
+setenv QUESTDATA_TEST /scr0/quest/data/test
+setenv QUESTDATA_ARCHIVE /scr0/quest/data
+
+setenv QUESTDATA $QUESTDATA_ARCHIVE       #default
+
+
+# Directories
+setenv NEWOFFLINEDIR /home/observer/newoffline
+setenv PREPROCDIR /home/observer/newoffline
+# test directory for realtime transfer
+#setenv REALTIME_TRANSFER_DIR "/quest17/data1/realtime"
+# normal directory for realtime transfer
+setenv REALTIME_TRANSFER_DIR "/quest17/data1/quest/data/realtime"
+setenv TRANSFERDIR /scr0/transfer
+setenv SCANINFODIR /home/observer/scan_info
+setenv QUESTOPSDIR /home/observer/questops.dir/questops
+setenv FOCUSDIR /home/observer/questops.dir/focus
+setenv PALOMARDIR /home/observer/palomar
+setenv QADIR /home/observer/nan/preproc
+#setenv NEATDATADIR /scr0/neat/test
+setenv OLDNEATDATADIR /neat/obsdata
+setenv NEATTEMPDIR /scr1/neat
+setenv NEATDATADIR /neat/camdata
+setenv NEATLOGDIR /neat/camdata/logs
+setenv QUESTNEATTEMPDIR $QUESTDATA
+setenv QUESTNEATDATADIR $QUESTDATA
+setenv USNODATADIR /quest17/data1/usnodata
+setenv SKYCALCDIR /home/observer/almanac
+#setenv FILTERLOG /neat/obsdata/logs/filter.log
+setenv FILTERLOG /neat/camdata/logs/filter.log
+# Host machines
+
+setenv DBHOST localhost
+setenv CAMHOST quest7   # camera is directly linked to this machine
+setenv FINGHOST quest7 # finger controls directly linked to this machine
+setenv TEMPHOST quest16 # temp contols directly linked to this machine
+setenv OBSHOST quest16  # observations run from/data sent to this machine
+
+# Software parameters
+setenv QUESTVERBOSE 0
+setenv SLEEP_DELAY 0
+
+# Path
+set path = (. ./bin ${PALOMARDIR}/bin ${QUESTOPSDIR}/bin ${HOME}/questops.dir/get_image.dir/bin ~/iraf.dir/bin ~/questops.dir/focus/bin $path )
+

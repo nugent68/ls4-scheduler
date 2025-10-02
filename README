@@ -1,0 +1,34 @@
+ls4-scheduler
+D Rabinowitz 2025 Jul 16
+
+This is repository containts the source for "scheduler", a
+program to read a nightly pre-planned sequence of observations
+(a script) for the LS4 survey efficiently execute them. Based on
+the field locations, exposure times, number of required exposures,
+and other constraints (such as weather interruptions) it implements 
+a strategy to execute the observations in the most efficient order. 
+THe program communicates with the telescope (tcp) and camera 
+(ls4_control) controllers using TCP sockets to coordinate the
+observations.
+
+Also included in the repository are scripts for starting/stopping
+or  pausing/resuming the scheduler and for checking the telescope
+status and making nightly observatopms summaries.
+
+Installation:
+
+  Create a "observer" user to run the LS4 observing progam.
+
+  Copy  ./observer_conf/observer_tcshrc to /home/observer/.tcshrc
+
+  Edit observer_conf/observer_setup.csh and set "LS4_SRC" to the directory
+  where this repository (and other LS4 repositories) are located.
+
+  Copy observer_conf/observer_setup.csh to  /home/observer.
+
+  Log in as observer, change to "/home/observer" and execute "observer_setup.csh"
+
+
+THis is a modification of the scheduler for LSQ (lsq-scheduler)
+
+

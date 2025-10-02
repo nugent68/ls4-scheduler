@@ -1,0 +1,144 @@
+#!/bin/tcsh
+#
+# script for retarting ls4 camera control software.
+# Use add argument "stop" to stop the control software instead of starting
+#
+#
+# syntax: restart_ccp [data_path] [stop (optional)]
+#
+#
+unalias rm
+source /home/observer/.login
+#
+
+#set CCP_LOG = "/home/observer/logs/ccp.log"
+#
+# if ccp is already running, it will be aborted. Wait up to MAX_ABORT_WAIT_SEC
+# for ccp to abort.
+set MAX_ABORT_WAIT_SEC = 25
+
+# After re-launching ccp, wait up to MAX_START_WAIT_SEC for ccp to start
+set MAX_START_WAIT_SEC = 25
+#
+set stop_flag = 0
+set data_path = $QUESTNEATDATADIR/test
+#
+if ( $#argv != 1 ) then
+   echo "ERROR: syntax restart_ccp [data_path or stop]"
+   exit
+endif
+
+if ( $argv[1] == "stop" || $argv[1] == "STOP" || $argv[1] == "Stop" ) then
+      set stop_flag = 1
+else
+  set data_path = $argv[1]
+  if ( ! -e $data_path ) then 
+     mkdir $data_path
+     if ( ! -e $data_path ) then
+       echo "ERROR: unable to create data path at $data_path"
+       exit
+     endif
+  endif
+endif
+#
+## copy and existing questmgr script to ~guest
+#echo "executing copy_script" 
+#copy_script
+#
+# Execute an abort for ccp, even if it is not currently running.
+$LS4_CONTROL_ROOT/scripts/abort_server.bash
+
+# Check if ccp is still running
+set is_running = `ps -aef | grep -e "ccp" | grep -ve "tail" | grep -ve "grep" | wc -l`
+
+# If ccp is still running, keep checking every 5 sec. Give up after MAX_ABORT_WAIT_SEC.
+set wait_time = 0
+while ( $is_running > 0 && $wait_time < $MAX_ABORT_WAIT_SEC ) 
+     sleep 5
+     @ wait_time = $wait_time + 5
+     set is_running = `ps -aef | grep -e "run_ccp" | grep -ve "tail" | grep -ve "grep" | wc -l`
+     if ( $is_running > 0 ) then
+        echo "previous instance of ccp still running after waiting $wait_time sec " 
+     endif
+end
+
+if ( $is_running > 0 ) then
+   echo "ERROR: ccp still running $wait_time sec after abort. Exitting" 
+   exit
+else
+   echo "ccp successfully stopped."
+endif
+
+if ( $stop_flag ) exit
+
+# restart ccp. Note, other default options specified in start_ccp.bash
+echo "restarting ccp" 
+if ( -e $CCP_LOG ) rm $CCP_LOG
+if ( $FAKE_OBS ) then
+  $LS4_CONTROL_ROOT/scripts/start_ccp.bash -fake -log_level $CCP_LOG_LEVEL  -log $CCP_LOG  -data_path $data_path
+else
+  $LS4_CONTROL_ROOT/scripts/start_ccp.bash -log_level $CCP_LOG_LEVEL  -log $CCP_LOG  -data_path $data_path
+endif
+
+echo "waiting up to 25 seconds for ccp to start" 
+# Check if ccp is running
+set is_running = `ps -aef | grep -e "ccp" | grep -ve "tail" | grep -ve "grep" | wc -l`
+
+# If ccp is not running, keep checking every 5 sec. Give up after MAX_START_WAIT_SEC.
+set wait_time = 0
+while ( $is_running == 0 && $wait_time < $MAX_START_WAIT_SEC ) 
+     sleep 5
+     @ wait_time = $wait_time + 5
+     set is_running = `ps -aef | grep -e "ccp" | grep -ve "tail" | grep -ve "grep" | wc -l`
+     if ( $is_running == 0 ) then
+        echo "ccp not started after waiting $wait_time sec " 
+     endif
+end
+
+if ( $is_running == 0 ) then
+   echo "ERROR: ccp still running $wait_time sec after abort. Exitting" 
+   exit
+else
+   echo "ccp is running " 
+endif
+
+echo "checking ccp status" 
+
+set status_temp = "/tmp/ccp_status.tmp"
+if ( -e $status_temp ) rm $status_temp
+
+set wait_time = 0
+set started = 0
+while ( $wait_time < 25 && $started == 0 )
+  echo "echo status  | netcat -N $CCP_HOST $CCP_PORT >>& $status_temp " 
+  echo "status"  | netcat -N $CCP_HOST $CCP_PORT >>& $status_temp
+  if ( -e $status_temp ) cat $status_temp 
+
+  set n = `cat $status_temp | wc -l `
+  if ( $n > 0 ) then
+    set l = `grep -e "DONE" $status_temp | wc -l `
+  else 
+    set l = 0
+  endif 
+  if (  $n == 0 ) then
+    echo "wait_time: $wait_time no status returned  yet" 
+  else if ( $l == 0 ) then
+    echo "wait_time: $wait_time bad status: " 
+    cat $status_temp 
+  else
+    echo "wait_time: $wait_time ccp status is ok" 
+    set started = 1
+  endif
+  sleep 5
+  @ wait_time = $wait_time + 5
+end
+
+if ( $started == 0 ) then
+   echo "bad ccp status. Exitting"
+   exit
+else
+   echo "good  ccp status"
+endif
+#
+echo "done with restart_ccp" 
+

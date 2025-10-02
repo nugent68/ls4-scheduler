@@ -1,0 +1,8 @@
+#!/bin/tcsh
+
+# pause
+
+# send SIGUSR1 (signal 10) to scheduler
+
+slay 10 scheduler
+

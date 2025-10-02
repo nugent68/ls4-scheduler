@@ -1,0 +1,28 @@
+#!/usr/bin/perl -w
+
+die "Usage: slay.pl <signal> program_name\n" 
+    unless ($#ARGV == 0 || $#ARGV == 1);
+
+open(PS_CMD, "ps -auxw |") or die "open ps failed\n";
+
+while (<PS_CMD>) {
+
+    chomp;
+
+    if ($_ =~ /$ARGV[$#ARGV]/ && $_ !~ /slay/) {
+       @words = split;
+
+       $pid = $words[1];
+
+
+       if ($#ARGV == 0) {
+	   print "Killing $pid $ARGV[$#ARGV]\n";
+	   system("kill $pid");
+       } else {
+	   print "Signalling $pid $ARGV[$#ARGV] $ARGV[$#ARGV-1]\n";
+#	   system("kill $ARGV[$#ARGV-1] $pid");
+	   system("kill -s $ARGV[$#ARGV-1] $pid");
+       }
+    }
+
+}

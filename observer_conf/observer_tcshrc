@@ -1,0 +1,3 @@
+setenv LS4_ROOT /home/observer
+if ( ?$LS4_ROOT/.login ) source $LS4_ROOT/.login
+setenv PATH ".":"$LS4_ROOT/bin":"$LS4_ROOT/scheduler/scripts":"$PATH"

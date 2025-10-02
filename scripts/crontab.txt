@@ -1,0 +1,12 @@
+00 10  *  * *  /home/observer/bin/log_pressure
+00 09 *  * *  /home/observer/bin/daily_checkout
+00 14 * * * /home/observer/bin/update_filter_log
+#
+# QUEST/NEAT point & shoot    
+#
+05 16 * 8-12 * /home/observer/bin/grab_obsplan.csh
+00 17 * 8-12 * /home/observer/bin/quest_neat_startobs &
+00 07 * 8-12 * /home/observer/palomar/scripts/email_logs.csh
+#
+#
+#

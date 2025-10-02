@@ -1,0 +1,9 @@
+device x11
+data temp
+read x 2
+read y 3
+limits -6 6 -6 6
+box
+ptype 4 1
+expand 2
+points x y
