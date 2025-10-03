@@ -27,7 +27,8 @@ from scheduler_astro import (
 # La Silla Observatory coordinates
 LA_SILLA_LATITUDE = -29.2567  # degrees (south is negative)
 LA_SILLA_LONGITUDE = 70.7377 / 15.0  # convert to hours (west is positive)
-LA_SILLA_ALTITUDE = 2400  # meters (not used in basic calculations)
+# LA_SILLA_ALTITUDE = 2400  # meters (not used in basic calculations)
+LA_SILLA_ALTITUDE = 2347  # meters (not used in basic calculations)
 
 # Time zone offset for Chile
 # Chile uses CLT (UTC-3) in winter and CLST (UTC-4) in summer
