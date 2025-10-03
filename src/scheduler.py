@@ -40,7 +40,7 @@ from scheduler_telescope import (
     init_telescope_offsets, print_telescope_status
 )
 
-from scheduler_astro import (
+from scheduler_astropy import (
     julian_date, lst, galactic_coordinates, ecliptic_coordinates,
     rise_set_times, moon_position, moon_separation, twilight_times,
     altitude_azimuth, airmass
