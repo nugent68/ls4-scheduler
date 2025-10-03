@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 # Add src directory to path to import scheduler_astro
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
-from scheduler_astro import (
+from scheduler_astropy import (
     julian_date,
     jd_to_datetime,
     lst,
