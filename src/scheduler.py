@@ -17,11 +17,34 @@ import json
 import signal
 import logging
 import pickle
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Tuple, Optional, Union, Any
 from dataclasses import dataclass, field
 from enum import Enum, IntEnum
 import numpy as np
+
+# Import scheduler modules
+from scheduler_camera import (
+    CameraStatus, FitsHeader as CameraFitsHeader, Field as CameraField,
+    update_camera_status, clear_camera, take_exposure, wait_camera_readout,
+    imprint_fits_header, get_ut, get_jd, get_tm,
+    DARK_CODE, SKY_CODE, FOCUS_CODE, OFFSET_CODE, 
+    EVENING_FLAT_CODE, MORNING_FLAT_CODE, DOME_FLAT_CODE,
+    EXP_MODE_FIRST, EXP_MODE_NEXT, EXP_MODE_SINGLE
+)
+
+from scheduler_telescope import (
+    TelescopeStatus, Field as TelescopeField,
+    update_telescope_status, point_telescope, stop_telescope, stow_telescope,
+    set_telescope_focus, focus_telescope, get_telescope_offsets,
+    init_telescope_offsets, print_telescope_status
+)
+
+from scheduler_astro import (
+    julian_date, lst, galactic_coordinates, ecliptic_coordinates,
+    rise_set_times, moon_position, moon_separation, twilight_times,
+    altitude_azimuth, airmass
+)
 
 # Configure logging
 logging.basicConfig(
@@ -48,11 +71,14 @@ class Config:
     TRACKING_CORRECTIONS_ON = False
     USE_TELESCOPE_OFFSETS = False
     DEEP_DITHER_ON = False
+    USE_12DEG_START = True
     
     # Time constants
     SIDEREAL_DAY_IN_HOURS = 23.93446972
     LST_SEARCH_INCREMENT = 0.00166  # 1 minute in hours
-    FAKE_RUN_TIME_STEP = 0.0167     # 1 minute in hours
+    LOOP_WAIT_SEC = 10  # seconds to wait between loops if no field selected
+    STARTUP_TIME = 0.0  # hours after twilight
+    MIN_EXECUTION_TIME = 0.029  # hours
     
     # Observation constraints
     MAX_AIRMASS = 2.0
@@ -62,12 +88,14 @@ class Config:
     MIN_MOON_SEPARATION = 15.0  # degrees
     
     # Exposure settings
-    MAX_EXPT = 1000.0  # seconds
+    MAX_EXPT = 1000.0 / 3600.0  # hours
     MIN_INTERVAL = 0.0  # hours
-    MAX_INTERVAL = 12.0  # hours (43200 seconds)
-    LONG_EXPTIME = 1.0  # hours (3600 seconds)
+    MAX_INTERVAL = 12.0  # hours
+    LONG_EXPTIME = 1.0  # hours
     MAX_BAD_READOUTS = 3
     CLEAR_INTERVAL = 0.1  # hours since last exposure to start clear
+    NUM_CAMERA_CLEARS = 3
+    EXPOSURE_OVERHEAD = 0.005  # hours
     
     # Focus settings
     MIN_FOCUS = 24.0  # mm
@@ -78,14 +106,9 @@ class Config:
     NOMINAL_FOCUS_START = 25.30  # mm
     NOMINAL_FOCUS_INCREMENT = 0.05  # mm
     NOMINAL_FOCUS_DEFAULT = 25.30  # mm
-    NUM_FOCUS_ITERATIONS = 2
-    MAX_FOCUS_DEVIATION = 0.05  # mm
+    FOCUS_OVERHEAD = 0.00555  # hours (20 seconds)
     
     # Timing settings
-    USE_12DEG_START = True
-    STARTUP_TIME = 0.0  # hours after twilight
-    MIN_EXECUTION_TIME = 0.029  # hours
-    FOCUS_OVERHEAD = 0.00555  # hours (20 seconds)
     SKYFLAT_WAIT_TIME = 0.5 / 24  # days
     DARK_WAIT_TIME = 0.0 / 24  # days
     
@@ -105,18 +128,10 @@ class Config:
     # Limits
     MAX_OBS_PER_FIELD = 100
     MAX_FIELDS = 500
-    MAX_FITS_WORDS = 100
     
     # Mathematical constants
     DEG_TO_RAD = math.pi / 180.0
     RAD_TO_DEG = 180.0 / math.pi
-    
-    # Camera settings
-    NUM_CAMERA_CLEARS = 3
-    EXPOSURE_OVERHEAD = 0.005  # hours
-    
-    # Filter names
-    FILTER_NAMES = ["rgzz", "none", "fake", "clear"]
 
 
 # ============================================================================
@@ -134,14 +149,13 @@ class FieldStatus(IntEnum):
 class ShutterCode(IntEnum):
     """Shutter operation codes"""
     BAD = -1
-    DARK = 0
-    SKY = 1
-    FOCUS = 2
-    OFFSET = 3
-    EVENING_FLAT = 4
-    MORNING_FLAT = 5
-    DOME_FLAT = 6
-    LIGO = 7
+    DARK = DARK_CODE
+    SKY = SKY_CODE
+    FOCUS = FOCUS_CODE
+    OFFSET = OFFSET_CODE
+    EVENING_FLAT = EVENING_FLAT_CODE
+    MORNING_FLAT = MORNING_FLAT_CODE
+    DOME_FLAT = DOME_FLAT_CODE
 
 
 class SurveyCode(IntEnum):
@@ -167,29 +181,6 @@ class SelectionCode(Enum):
     LEAST_TIME_READY_MUST_DO = 9
     LEAST_TIME_READY = 10
     MOST_TIME_READY_LATE = 11
-
-
-class CameraState(IntEnum):
-    """Camera controller state codes"""
-    NOSTATUS = 0
-    UNKNOWN = 1
-    IDLE = 2
-    EXPOSING = 3
-    READOUT_PENDING = 4
-    READING = 5
-    FETCHING = 6
-    FLUSHING = 7
-    ERASING = 8
-    PURGING = 9
-    AUTOCLEAR = 10
-    AUTOFLUSH = 11
-    POWERON = 12
-    POWEROFF = 13
-    POWERBAD = 14
-    FETCH_PENDING = 15
-    ERROR = 16
-    ACTIVE = 17
-    ERRORED = 18
 
 
 # ============================================================================
@@ -244,76 +235,6 @@ class NightTimes:
     ra_moon: float = 0.0
     dec_moon: float = 0.0
     percent_moon: float = 0.0
-
-
-@dataclass
-class WeatherInfo:
-    """Weather information"""
-    temperature: float = 0.0
-    humidity: float = 0.0
-    wind_speed: float = 0.0
-    wind_direction: float = 0.0
-    dew_point: float = 0.0
-    dome_status: int = -1  # -1 unknown, 0 closed, 1 open
-
-
-@dataclass
-class TelescopeStatus:
-    """Telescope status information"""
-    lst: float = 0.0  # Local sidereal time in hours
-    filter_string: str = ""
-    focus: float = Config.NOMINAL_FOCUS_DEFAULT  # Focus setting in mm
-    dome_status: int = 0  # 0 closed, 1 open
-    ut: float = 0.0  # Universal time in hours
-    ra: float = 0.0  # RA pointing in hours
-    dec: float = 0.0  # Dec pointing in degrees
-    ra_offset: float = 0.0  # RA correction in degrees
-    dec_offset: float = 0.0  # Dec correction in degrees
-    weather: WeatherInfo = field(default_factory=WeatherInfo)
-    update_time: float = 0.0
-
-
-@dataclass
-class CameraStatus:
-    """Camera status information"""
-    ready: bool = False
-    error: bool = False
-    error_code: int = 0
-    state: str = ""
-    comment: str = ""
-    date: str = ""
-    read_time: float = 0.0
-    state_values: Dict[str, bool] = field(default_factory=dict)
-
-
-@dataclass
-class FitsWord:
-    """FITS header keyword-value pair"""
-    keyword: str
-    value: str
-
-
-@dataclass
-class FitsHeader:
-    """FITS header information"""
-    num_words: int = 0
-    words: List[FitsWord] = field(default_factory=list)
-    
-    def add_word(self, keyword: str, value: str):
-        """Add or update a FITS header keyword"""
-        for word in self.words:
-            if word.keyword == keyword:
-                word.value = value
-                return
-        self.words.append(FitsWord(keyword, value))
-        self.num_words = len(self.words)
-    
-    def get_value(self, keyword: str) -> Optional[str]:
-        """Get value for a FITS header keyword"""
-        for word in self.words:
-            if word.keyword == keyword:
-                return word.value
-        return None
 
 
 @dataclass
@@ -383,208 +304,6 @@ class Field:
 
 
 # ============================================================================
-# Utility Functions
-# ============================================================================
-
-def clock_difference(h1: float, h2: float) -> float:
-    """
-    Calculate the difference between two clock values (0-24 hour range).
-    
-    Args:
-        h1: First hour value
-        h2: Second hour value
-    
-    Returns:
-        Difference h2 - h1, constrained to [-12, 12] hours
-    """
-    dt = h2 - h1
-    if dt > 12.0:
-        dt -= 24.0
-    if dt < -12.0:
-        dt += 24.0
-    return dt
-
-
-def get_ha(ra: float, lst: float) -> float:
-    """
-    Calculate hour angle from RA and LST.
-    
-    Args:
-        ra: Right ascension in hours
-        lst: Local sidereal time in hours
-    
-    Returns:
-        Hour angle in hours, range [-12, 12]
-    """
-    ha = lst - ra
-    if ha <= -12.0:
-        ha += 24.0
-    elif ha >= 12.0:
-        ha -= 24.0
-    return ha
-
-
-def get_airmass(ha: float, dec: float, lat: float) -> float:
-    """
-    Calculate airmass for given hour angle and declination.
-    
-    Args:
-        ha: Hour angle in hours
-        dec: Declination in degrees
-        lat: Observatory latitude in degrees
-    
-    Returns:
-        Airmass (1.0 at zenith, >1000 if below horizon)
-    """
-    # Convert to radians
-    ha_rad = ha * 15.0 * Config.DEG_TO_RAD
-    dec_rad = dec * Config.DEG_TO_RAD
-    lat_rad = lat * Config.DEG_TO_RAD
-    
-    # Calculate altitude
-    sin_alt = (math.sin(dec_rad) * math.sin(lat_rad) + 
-               math.cos(dec_rad) * math.cos(lat_rad) * math.cos(ha_rad))
-    
-    if sin_alt <= 0:
-        return 1000.0  # Below horizon
-    
-    return 1.0 / sin_alt
-
-
-def julian_date(year: int, month: int, day: int, hour: float = 0.0) -> float:
-    """
-    Calculate Julian Date for given date and time.
-    
-    Args:
-        year: Year
-        month: Month (1-12)
-        day: Day of month
-        hour: Hour of day (decimal)
-    
-    Returns:
-        Julian Date
-    """
-    if month <= 2:
-        year -= 1
-        month += 12
-    
-    a = int(year / 100)
-    b = 2 - a + int(a / 4)
-    
-    jd = int(365.25 * (year + 4716)) + int(30.6001 * (month + 1)) + day + b - 1524.5
-    jd += hour / 24.0
-    
-    return jd
-
-
-def get_shutter_string(shutter: ShutterCode) -> Tuple[str, str]:
-    """
-    Get string representations for shutter code.
-    
-    Args:
-        shutter: Shutter code enum value
-    
-    Returns:
-        Tuple of (single_char, description) strings
-    """
-    shutter_map = {
-        ShutterCode.BAD: ("?", "unknown"),
-        ShutterCode.DARK: ("d", "dark"),
-        ShutterCode.SKY: ("s", "sky"),
-        ShutterCode.FOCUS: ("f", "focus"),
-        ShutterCode.OFFSET: ("p", "offset"),
-        ShutterCode.EVENING_FLAT: ("e", "pmskyflat"),
-        ShutterCode.MORNING_FLAT: ("m", "amskyflat"),
-        ShutterCode.DOME_FLAT: ("l", "domeskyflat"),
-    }
-    return shutter_map.get(shutter, ("?", "unknown"))
-
-
-def get_shutter_code(shutter_str: str) -> ShutterCode:
-    """
-    Convert shutter string to code.
-    
-    Args:
-        shutter_str: Single character shutter string
-    
-    Returns:
-        Corresponding ShutterCode enum value
-    """
-    shutter_map = {
-        "Y": ShutterCode.SKY,
-        "y": ShutterCode.SKY,
-        "N": ShutterCode.DARK, 
-        "n": ShutterCode.DARK,
-        "F": ShutterCode.FOCUS,
-        "f": ShutterCode.FOCUS,
-        "P": ShutterCode.OFFSET,
-        "p": ShutterCode.OFFSET,
-        "E": ShutterCode.EVENING_FLAT,
-        "e": ShutterCode.EVENING_FLAT,
-        "M": ShutterCode.MORNING_FLAT,
-        "m": ShutterCode.MORNING_FLAT,
-        "L": ShutterCode.DOME_FLAT,
-        "l": ShutterCode.DOME_FLAT,
-    }
-    return shutter_map.get(shutter_str, ShutterCode.BAD)
-
-
-def get_dither(iteration: int, step_size: float) -> Tuple[float, float]:
-    """
-    Calculate dither offset for flat field observations.
-    
-    Args:
-        iteration: Iteration number (0-based)
-        step_size: Dither step size in degrees
-    
-    Returns:
-        Tuple of (ra_dither, dec_dither) in degrees
-    """
-    if iteration == 0:
-        return (0.0, 0.0)
-    
-    # Determine square size based on iteration
-    if iteration <= 8:
-        square_size = 3
-        i0 = 1
-    elif iteration <= 24:
-        square_size = 5
-        i0 = 9
-    elif iteration <= 48:
-        square_size = 7
-        i0 = 25
-    elif iteration <= 80:
-        square_size = 9
-        i0 = 49
-    elif iteration <= 120:
-        square_size = 11
-        i0 = 81
-    else:
-        logger.warning(f"Too many dither iterations: {iteration}")
-        return (0.0, 0.0)
-    
-    i = iteration - i0
-    side = i // (square_size - 1)
-    step_a = square_size // 2
-    step_b = i - side * (square_size - 1)
-    
-    if side == 0:
-        ra_dither = step_a
-        dec_dither = step_b - step_a
-    elif side == 1:
-        ra_dither = step_b - step_a + 1
-        dec_dither = step_a
-    elif side == 2:
-        ra_dither = -step_a
-        dec_dither = step_b - step_a + 1
-    else:
-        ra_dither = step_b - step_a
-        dec_dither = -step_a
-    
-    return (ra_dither * step_size, dec_dither * step_size)
-
-
-# ============================================================================
 # Main Scheduler Class
 # ============================================================================
 
@@ -592,12 +311,7 @@ class Scheduler:
     """Main astronomical observation scheduler"""
     
     def __init__(self, config: Optional[Config] = None):
-        """
-        Initialize the scheduler.
-        
-        Args:
-            config: Configuration object (uses defaults if None)
-        """
+        """Initialize the scheduler"""
         self.config = config or Config()
         self.fields: List[Field] = []
         self.num_fields = 0
@@ -605,7 +319,7 @@ class Scheduler:
         self.night_times = NightTimes()
         self.telescope_status = TelescopeStatus()
         self.camera_status = CameraStatus()
-        self.fits_header = FitsHeader()
+        self.fits_header = CameraFitsHeader()
         
         # Control flags
         self.pause_flag = False
@@ -614,6 +328,8 @@ class Scheduler:
         self.focus_done = False
         self.offset_done = False
         self.done = False
+        self.bad_weather = False
+        self.telescope_ready = False
         
         # Focus parameters
         self.focus_start = Config.NOMINAL_FOCUS_START
@@ -633,11 +349,8 @@ class Scheduler:
         # Filter name
         self.filter_name = ""
         
-        # Initialize signal handlers
+        # Install signal handlers
         self._install_signal_handlers()
-        
-        # Initialize FITS header
-        self._init_fits_header()
         
         logger.info("Scheduler initialized")
     
@@ -664,62 +377,763 @@ class Scheduler:
         logger.info("Received SIGUSR2, resuming observations")
         self.pause_flag = False
     
-    def _init_fits_header(self):
-        """Initialize FITS header with default keywords"""
-        default_keywords = [
-            ("TELESCOP", "LS4"),
-            ("INSTRUME", "LS4-CAM"),
-            ("OBSERVER", "SCHEDULER"),
-            ("OBJECT", "SURVEY"),
-            ("EXPTIME", "0.0"),
-            ("DATE-OBS", ""),
-            ("UT", "0.0"),
-            ("LST", "0.0"),
-            ("HA", "0.0"),
-            ("AIRMASS", "0.0"),
-            ("FILTER", ""),
-            ("FOCUS", str(self.focus_default)),
-            ("RA", "0.0"),
-            ("DEC", "0.0"),
-            ("EPOCH", "2000.0"),
-            ("EQUINOX", "2000.0"),
-        ]
-        
-        for keyword, value in default_keywords:
-            self.fits_header.add_word(keyword, value)
-    
-    def load_site_params(self, site_name: str = "DEFAULT"):
+    def run_observation_loop(self, sequence_file: str, date: datetime):
         """
-        Load site parameters for the observatory.
+        Main observation loop implementing the while loop from scheduler.c line 496
         
         Args:
-            site_name: Name of the observatory site
+            sequence_file: Path to observation sequence file
+            date: Local date for observations
         """
-        # This would normally load from a configuration file
-        # For now, using default values (La Silla observatory)
-        self.site.site_name = site_name
-        self.site.longitude = 4.714  # West longitude in hours
-        self.site.latitude = -29.257  # degrees
-        self.site.elevation = 2347.0  # meters
-        self.site.elevation_sea = 2347.0
-        self.site.horizon = 0.0
-        self.site.std_timezone = 4.0  # Chile Standard Time
-        self.site.zone_name = "CLT"
-        self.site.zone_abbr = "C"
-        self.site.use_dst = 0
+        # Initialize night times
+        self._init_night_times(date)
         
-        logger.info(f"Loaded site parameters for {site_name}")
+        # Load or resume observations
+        num_fields = self.load_obs_record()
+        if num_fields <= 0:
+            num_fields = self.load_sequence(sequence_file)
+            if num_fields < 1:
+                logger.error("No valid fields to observe")
+                return
+        
+        # Open output files
+        self._open_output_files()
+        
+        # Wait for sunset if needed
+        if not self.config.FAKE_RUN:
+            self._wait_for_sunset()
+            
+            # Initialize camera and telescope
+            if not self._initialize_hardware():
+                return
+        
+        # Initialize fields for observation
+        jd = get_jd() if not self.config.FAKE_RUN else self.night_times.jd_start
+        num_observable = self._init_fields(jd)
+        
+        logger.info(f"Starting observations with {num_observable} observable fields")
+        
+        # Main observation loop (line 496 in scheduler.c)
+        while jd < self.night_times.jd_sunrise and not self.done:
+            
+            # Update time
+            if not self.config.FAKE_RUN:
+                ut = get_ut()
+                jd = get_jd()
+            else:
+                ut = self.night_times.ut_start + (jd - self.night_times.jd_start) * 24.0
+            
+            # Check for new fields to add
+            self._check_new_fields(sequence_file + ".add", jd)
+            
+            # Handle pause state
+            if self.pause_flag:
+                self._handle_pause(ut, jd)
+                if self.config.FAKE_RUN:
+                    jd += Config.LOOP_WAIT_SEC / 86400.0
+                else:
+                    time.sleep(Config.LOOP_WAIT_SEC)
+                continue
+            
+            # Check weather and telescope status
+            if not self.config.FAKE_RUN:
+                self._update_telescope_and_weather()
+            
+            # Handle focus sequence completion
+            if self._check_focus_completion():
+                continue
+                
+            # Handle offset sequence completion
+            if self._check_offset_completion():
+                continue
+            
+            # Select next field to observe
+            i = self._get_next_field(jd)
+            
+            if i < 0:
+                # No fields ready
+                logger.debug(f"UT {ut:9.6f}: No fields ready to observe")
+                
+                # Stop telescope if needed
+                if not self.config.FAKE_RUN and self.telescope_ready:
+                    if self.bad_weather and not self.stop_flag:
+                        logger.info(f"UT {ut:9.6f}: Stopping telescope due to weather")
+                        stop_telescope()
+                        self.stop_flag = True
+                    elif not self.stop_flag:
+                        logger.info(f"UT {ut:9.6f}: Stopping telescope - no fields")
+                        stop_telescope()
+                        self.stop_flag = True
+                
+                # Check if observations should end
+                if jd > self.night_times.jd_end:
+                    logger.info("Ending scheduled observations")
+                    self.done = True
+                else:
+                    # Wait before checking again
+                    if self.config.FAKE_RUN:
+                        jd += Config.LOOP_WAIT_SEC / 86400.0
+                    else:
+                        time.sleep(Config.LOOP_WAIT_SEC)
+            
+            # Observe selected field
+            elif (self.fields[i].shutter == ShutterCode.DARK or 
+                  self.fields[i].shutter == ShutterCode.DOME_FLAT or
+                  (not self.bad_weather and self.telescope_ready)):
+                
+                # Reset focus/offset flags if needed
+                if self.focus_done and self.fields[i].shutter == ShutterCode.FOCUS:
+                    self.focus_done = False
+                elif self.offset_done and self.fields[i].shutter == ShutterCode.OFFSET:
+                    self.offset_done = False
+                
+                # Determine exposure mode
+                if self.i_prev < 0:
+                    exp_mode = EXP_MODE_FIRST
+                else:
+                    exp_mode = EXP_MODE_NEXT
+                
+                # Observe the field
+                dt = self._observe_next_field(i, jd, exp_mode)
+                
+                if dt is not None:
+                    # Save observation record
+                    self.save_obs_record()
+                    
+                    # Print history
+                    self._print_history(jd)
+                    
+                    # Update time and previous field
+                    if self.config.FAKE_RUN:
+                        jd += dt / 24.0
+                    
+                    self.i_prev = i
+                else:
+                    logger.error(f"Error observing field {i}")
+                    if not self.config.FAKE_RUN and self.telescope_ready and not self.stop_flag:
+                        stop_telescope()
+                        self.stop_flag = True
+            
+            else:
+                # Wait for conditions to improve
+                if not self.telescope_ready:
+                    logger.info("Waiting for telescope...")
+                elif self.bad_weather:
+                    logger.info("Waiting for dome to open...")
+                
+                if self.config.FAKE_RUN:
+                    jd += Config.LOOP_WAIT_SEC / 86400.0
+                else:
+                    time.sleep(Config.LOOP_WAIT_SEC)
+        
+        # End of observations
+        logger.info(f"UT {ut:9.6f}: Ending observations")
+        
+        # Stow telescope if needed
+        if not self.config.FAKE_RUN and jd > self.night_times.jd_sunrise:
+            logger.info("Stowing telescope")
+            stow_telescope()
+        
+        # Print final statistics
+        self._print_final_stats()
+    
+    def _observe_next_field(self, index: int, jd: float, exp_mode: str) -> Optional[float]:
+        """
+        Observe the next field
+        
+        Args:
+            index: Field index to observe
+            jd: Current Julian Date
+            exp_mode: Exposure mode
+            
+        Returns:
+            Time taken in hours, or None on error
+        """
+        field_obj = self.fields[index]
+        wait_flag = False  # Don't wait for readout to overlap with slew
+        
+        logger.info(f"Observing field {field_obj.field_number} "
+                   f"(RA={field_obj.ra:.6f}, Dec={field_obj.dec:.5f}, "
+                   f"n_done={field_obj.n_done}/{field_obj.n_required})")
+        
+        # Point telescope if needed (not for darks/flats)
+        if (field_obj.shutter not in [ShutterCode.DARK, ShutterCode.DOME_FLAT] and 
+            not self.config.FAKE_RUN):
+            
+            # Calculate pointing with offsets
+            ra_point = field_obj.ra
+            dec_point = field_obj.dec
+            
+            if self.config.USE_TELESCOPE_OFFSETS and field_obj.shutter == ShutterCode.SKY:
+                ra_point -= self.telescope_status.ra_offset / 15.0
+                dec_point -= self.telescope_status.dec_offset
+            
+            logger.debug(f"Pointing telescope to {ra_point:.6f}, {dec_point:.5f}")
+            if point_telescope(ra_point, dec_point) != 0:
+                logger.error("Failed to point telescope")
+                return None
+            
+            self.stop_flag = False
+        
+        # Update telescope status
+        if not self.config.FAKE_RUN and field_obj.shutter not in [ShutterCode.DARK, ShutterCode.DOME_FLAT]:
+            if update_telescope_status(self.telescope_status) != 0:
+                logger.error("Failed to update telescope status")
+                return None
+        
+        # Set focus for focus sequence
+        if field_obj.shutter == ShutterCode.FOCUS and not self.config.FAKE_RUN:
+            focus = self.focus_start + self.focus_increment * field_obj.n_done
+            logger.info(f"Setting focus to {focus:.5f} mm")
+            if set_telescope_focus(focus) != 0:
+                logger.error("Failed to set telescope focus")
+                return None
+        
+        # Wait for previous readout if needed
+        if not self.config.FAKE_RUN and self.i_prev >= 0:
+            if wait_camera_readout(self.camera_status) != 0:
+                logger.warning("Bad readout of previous exposure")
+                if self.i_prev >= 0 and self.fields[self.i_prev].n_done > 0:
+                    self.fields[self.i_prev].n_done -= 1
+                    self.fields[self.i_prev].jd_next = jd
+        
+        # Clear camera if needed
+        if not self.config.FAKE_RUN:
+            dt_clear = (get_ut() - self.ut_prev) if self.ut_prev > 0 else 1000
+            if dt_clear > Config.CLEAR_INTERVAL:
+                logger.info("Clearing camera")
+                for _ in range(Config.NUM_CAMERA_CLEARS):
+                    clear_camera()
+        
+        # Create camera field object
+        cam_field = CameraField(
+            expt=field_obj.expt,
+            shutter=int(field_obj.shutter),
+            script_line=field_obj.script_line,
+            n_done=field_obj.n_done,
+            n_required=field_obj.n_required
+        )
+        
+        # Take exposure
+        if not self.config.FAKE_RUN:
+            try:
+                result = take_exposure(
+                    cam_field,
+                    self.fits_header,
+                    exposure_override_hours=0,
+                    exp_mode=exp_mode,
+                    wait_for_readout=wait_flag
+                )
+                
+                # Update field with observation data
+                field_obj.ut[field_obj.n_done] = result.ut_hours
+                field_obj.jd[field_obj.n_done] = result.jd
+                field_obj.actual_expt[field_obj.n_done] = result.actual_exposure_sec / 3600.0
+                field_obj.filenames[field_obj.n_done] = result.filename
+                
+                self.ut_prev = result.ut_hours
+                dt = field_obj.expt + Config.EXPOSURE_OVERHEAD
+                
+            except Exception as e:
+                logger.error(f"Exposure failed: {e}")
+                return None
+        else:
+            # Simulate exposure
+            dt = field_obj.expt + Config.EXPOSURE_OVERHEAD
+            field_obj.ut[field_obj.n_done] = get_ut()
+            field_obj.jd[field_obj.n_done] = jd
+            field_obj.actual_expt[field_obj.n_done] = field_obj.expt
+            field_obj.filenames[field_obj.n_done] = f"sim_{field_obj.field_number}_{field_obj.n_done}"
+        
+        # Update field status
+        field_obj.n_done += 1
+        field_obj.jd_next = jd + field_obj.interval
+        
+        # Log observation
+        if self.log_file:
+            self._log_observation(field_obj, jd)
+        
+        logger.info(f"Field {field_obj.field_number}: {field_obj.n_done}/{field_obj.n_required} done, "
+                   f"next at JD {field_obj.jd_next:.6f}")
+        
+        return dt
+    
+    def _get_next_field(self, jd: float) -> int:
+        """
+        Select the next field to observe
+        
+        Args:
+            jd: Current Julian Date
+            
+        Returns:
+            Index of selected field, or -1 if none available
+        """
+        # Update all field statuses
+        for field_obj in self.fields:
+            self._update_field_status(field_obj, jd)
+        
+        # Priority 1: DO_NOW fields (darks, flats, focus, offset)
+        for i, field_obj in enumerate(self.fields):
+            if field_obj.status == FieldStatus.DO_NOW:
+                logger.debug(f"Selected DO_NOW field {i}")
+                return i
+        
+        # Priority 2: MUST_DO fields that are ready
+        ready_mustdo = [(i, f) for i, f in enumerate(self.fields) 
+                        if f.status == FieldStatus.READY and f.survey_code == SurveyCode.MUSTDO]
+        
+        if ready_mustdo:
+            # Choose the one with least time left
+            i, _ = min(ready_mustdo, key=lambda x: x[1].time_left)
+            logger.debug(f"Selected MUST_DO field {i}")
+            return i
+        
+        # Priority 3: Regular fields that are ready
+        ready_fields = [(i, f) for i, f in enumerate(self.fields) 
+                        if f.status == FieldStatus.READY]
+        
+        if ready_fields:
+            # Choose the one with least time left
+            i, _ = min(ready_fields, key=lambda x: x[1].time_left)
+            logger.debug(f"Selected ready field {i}")
+            return i
+        
+        # Priority 4: Late fields that can be shortened
+        late_fields = [(i, f) for i, f in enumerate(self.fields) 
+                       if f.status == FieldStatus.TOO_LATE and f.doable]
+        
+        if late_fields:
+            # Try to shorten interval for the most urgent one
+            i, field_obj = max(late_fields, key=lambda x: x[1].time_left)
+            self._shorten_interval(field_obj)
+            self._update_field_status(field_obj, jd)
+            
+            if field_obj.status == FieldStatus.READY:
+                logger.debug(f"Selected late field {i} with shortened interval")
+                return i
+        
+        return -1
+    
+    def _update_field_status(self, field_obj: Field, jd: float):
+        """Update field status based on current conditions"""
+        # Check if field is doable
+        if not field_obj.doable:
+            field_obj.status = FieldStatus.NOT_DOABLE
+            return
+        
+        # Check if completed
+        if field_obj.n_done >= field_obj.n_required:
+            field_obj.doable = False
+            field_obj.status = FieldStatus.NOT_DOABLE
+            return
+        
+        # Check if risen
+        if jd < field_obj.jd_rise:
+            field_obj.status = FieldStatus.NOT_DOABLE
+            return
+        
+        # Check if set
+        if jd > field_obj.jd_set:
+            field_obj.doable = False
+            field_obj.status = FieldStatus.NOT_DOABLE
+            return
+        
+        # Check if ready for next observation
+        if field_obj.jd_next - jd > Config.MIN_EXECUTION_TIME / 24.0:
+            field_obj.status = FieldStatus.NOT_DOABLE
+            return
+        
+        # Darks and dome flats are always DO_NOW when ready
+        if field_obj.shutter in [ShutterCode.DARK, ShutterCode.DOME_FLAT]:
+            field_obj.status = FieldStatus.DO_NOW
+            return
+        
+        # Focus, offset, and sky flats are DO_NOW in good weather
+        if field_obj.shutter in [ShutterCode.FOCUS, ShutterCode.OFFSET, 
+                                 ShutterCode.EVENING_FLAT, ShutterCode.MORNING_FLAT]:
+            if not self.bad_weather:
+                field_obj.status = FieldStatus.DO_NOW
+            else:
+                field_obj.status = FieldStatus.NOT_DOABLE
+            return
+        
+        # Regular sky fields - check time constraints
+        field_obj.time_required = (field_obj.n_required - field_obj.n_done) * field_obj.interval
+        field_obj.time_up = (field_obj.jd_set - jd) * 24.0
+        field_obj.time_left = field_obj.time_up - field_obj.time_required
+        
+        if field_obj.time_left < 0:
+            field_obj.status = FieldStatus.TOO_LATE
+        else:
+            field_obj.status = FieldStatus.READY
+    
+    def _shorten_interval(self, field_obj: Field):
+        """Shorten observation interval for late fields"""
+        new_interval = field_obj.time_up / (field_obj.n_required - field_obj.n_done)
+        
+        if new_interval > Config.MIN_INTERVAL:
+            field_obj.interval = new_interval
+            field_obj.time_required = new_interval * (field_obj.n_required - field_obj.n_done)
+            field_obj.time_left = 0
+        else:
+            field_obj.doable = False
+    
+    def _check_focus_completion(self) -> bool:
+        """Check if focus sequence is complete and process it"""
+        if (self.i_prev >= 0 and not self.focus_done and
+            self.fields[self.i_prev].shutter == ShutterCode.FOCUS and
+            self.fields[self.i_prev].n_done == self.fields[self.i_prev].n_required):
+            
+            if not self.config.FAKE_RUN:
+                # Wait for readout
+                if wait_camera_readout(self.camera_status) != 0:
+                    logger.warning("Bad readout of last focus exposure")
+                    self.fields[self.i_prev].n_done -= 1
+                    return True
+                
+                # Get and set best focus
+                logger.info("Focus sequence complete, determining best focus")
+                
+                # Create telescope field for focus routine
+                tel_field = TelescopeField(
+                    field_number=self.fields[self.i_prev].field_number,
+                    n_done=self.fields[self.i_prev].n_done,
+                    filename="".join(self.fields[self.i_prev].filenames[:self.fields[self.i_prev].n_done])
+                )
+                
+                result = focus_telescope(tel_field, self.telescope_status, self.focus_default)
+                if result < 0:
+                    logger.error("Unable to focus telescope")
+                    self.save_obs_record()
+                    sys.exit(-1)
+                elif result > 0:
+                    logger.warning(f"Bad focus sequence, using default: {self.telescope_status.focus:.5f}")
+                else:
+                    logger.info(f"Telescope focus set to {self.telescope_status.focus:.5f}")
+            
+            self.focus_done = True
+            return True
+        
+        return False
+    
+    def _check_offset_completion(self) -> bool:
+        """Check if offset sequence is complete and process it"""
+        if (self.i_prev >= 0 and not self.offset_done and
+            self.fields[self.i_prev].shutter == ShutterCode.OFFSET and
+            self.fields[self.i_prev].n_done == self.fields[self.i_prev].n_required):
+            
+            if not self.config.FAKE_RUN:
+                # Wait for readout
+                if wait_camera_readout(self.camera_status) != 0:
+                    logger.warning("Bad readout of last offset exposure")
+                    self.fields[self.i_prev].n_done -= 1
+                    return True
+                
+                # Get and set telescope offsets
+                logger.info("Offset exposure complete, determining telescope offsets")
+                
+                # Create telescope field for offset routine
+                tel_field = TelescopeField(
+                    field_number=self.fields[self.i_prev].field_number,
+                    n_done=self.fields[self.i_prev].n_done,
+                    filename=self.fields[self.i_prev].filenames[self.fields[self.i_prev].n_done - 1]
+                )
+                
+                if get_telescope_offsets(tel_field, self.telescope_status) != 0:
+                    logger.warning("Unable to get offsets, using previous values")
+                else:
+                    logger.info(f"Telescope offsets set to {self.telescope_status.ra_offset:.6f}, "
+                               f"{self.telescope_status.dec_offset:.6f} deg")
+            
+            self.offset_done = True
+            return True
+        
+        return False
+    
+    def _init_fields(self, jd: float) -> int:
+        """Initialize field rise/set times and observability"""
+        num_observable = 0
+        
+        for field_obj in self.fields:
+            # Initialize observation tracking
+            field_obj.n_done = 0
+            field_obj.status = FieldStatus.NOT_DOABLE
+            field_obj.selection_code = SelectionCode.NOT_SELECTED
+            
+            # Calculate galactic coordinates
+            field_obj.gal_long, field_obj.gal_lat = galactic_coordinates(
+                field_obj.ra, field_obj.dec
+            )
+            
+            # Calculate ecliptic coordinates
+            field_obj.epoch, field_obj.ecl_long, field_obj.ecl_lat = ecliptic_coordinates(
+                field_obj.ra, field_obj.dec, jd
+            )
+            
+            # Special handling for darks and flats
+            if field_obj.shutter == ShutterCode.DARK:
+                field_obj.doable = True
+                field_obj.jd_rise = self.night_times.jd_start
+                field_obj.jd_set = self.night_times.jd_end
+                field_obj.jd_next = max(jd, field_obj.jd_rise)
+                num_observable += 1
+                continue
+            
+            if field_obj.shutter in [ShutterCode.DOME_FLAT, ShutterCode.FOCUS, ShutterCode.OFFSET]:
+                field_obj.doable = True
+                field_obj.jd_rise = self.night_times.jd_start
+                field_obj.jd_set = self.night_times.jd_end
+                field_obj.jd_next = self.night_times.jd_start
+                num_observable += 1
+                continue
+            
+            # Calculate rise/set times for sky fields
+            rise_jd, set_jd = self._get_field_rise_set(field_obj)
+            
+            if rise_jd is None or set_jd is None:
+                field_obj.doable = False
+                continue
+            
+            field_obj.jd_rise = rise_jd
+            field_obj.jd_set = set_jd
+            field_obj.time_up = (set_jd - rise_jd) * 24.0
+            field_obj.time_required = (field_obj.n_required - 1) * field_obj.interval
+            field_obj.time_left = field_obj.time_up - field_obj.time_required
+            
+            # Check observability constraints
+            if field_obj.time_left < 0 and field_obj.survey_code != SurveyCode.MUSTDO:
+                field_obj.doable = False
+                continue
+            
+            # Check moon interference for SNe fields
+            if field_obj.survey_code == SurveyCode.SNE:
+                moon_ra, moon_dec, illumination = moon_position(jd)
+                if illumination > 0.5:
+                    separation = moon_separation(field_obj.ra, field_obj.dec, moon_ra, moon_dec)
+                    if separation < Config.MIN_MOON_SEPARATION:
+                        field_obj.doable = False
+                        continue
+            
+            # Check galactic latitude for SNe fields
+            if field_obj.survey_code == SurveyCode.SNE and abs(field_obj.gal_lat) < 15.0:
+                field_obj.doable = False
+                continue
+            
+            # Field is observable
+            field_obj.doable = True
+            field_obj.jd_next = max(jd, field_obj.jd_rise)
+            num_observable += 1
+        
+        logger.info(f"Initialized {self.num_fields} fields, {num_observable} are observable")
+        return num_observable
+    
+    def _get_field_rise_set(self, field_obj: Field) -> Tuple[Optional[float], Optional[float]]:
+        """Calculate rise and set times for a field considering airmass constraints"""
+        # Use airmass constraint to determine altitude threshold
+        max_airmass = Config.MAX_AIRMASS
+        min_altitude = math.degrees(math.asin(1.0 / max_airmass))
+        
+        # Get rise/set times
+        rise_jd, set_jd = rise_set_times(
+            field_obj.ra, field_obj.dec, 
+            self.night_times.jd_start,
+            self.site.longitude, self.site.latitude,
+            min_altitude
+        )
+        
+        # Constrain to observing window
+        if rise_jd and rise_jd < self.night_times.jd_start:
+            rise_jd = self.night_times.jd_start
+        if set_jd and set_jd > self.night_times.jd_end:
+            set_jd = self.night_times.jd_end
+        
+        # Check if field is observable during the night
+        if rise_jd and set_jd and rise_jd < set_jd:
+            return rise_jd, set_jd
+        
+        return None, None
+    
+    def _init_night_times(self, date: datetime):
+        """Initialize night timing information"""
+        # Calculate JD for local noon
+        jd_noon = julian_date(date.year, date.month, date.day, 12, 0, 0)
+        
+        # Get twilight times
+        twilights = twilight_times(jd_noon, self.site.longitude, self.site.latitude)
+        
+        # Set night times
+        self.night_times.jd_sunset = twilights.get('sunset', jd_noon + 0.3)
+        self.night_times.jd_sunrise = twilights.get('sunrise', jd_noon + 0.7)
+        self.night_times.jd_evening12 = twilights.get('nautical_dusk', self.night_times.jd_sunset + 0.05)
+        self.night_times.jd_morning12 = twilights.get('nautical_dawn', self.night_times.jd_sunrise - 0.05)
+        self.night_times.jd_evening18 = twilights.get('astronomical_dusk', self.night_times.jd_evening12 + 0.03)
+        self.night_times.jd_morning18 = twilights.get('astronomical_dawn', self.night_times.jd_morning12 - 0.03)
+        
+        # Set observation start/end times
+        if self.config.USE_12DEG_START:
+            self.night_times.jd_start = self.night_times.jd_evening12 + Config.STARTUP_TIME / 24.0
+            self.night_times.jd_end = self.night_times.jd_morning12 - Config.MIN_EXECUTION_TIME / 24.0
+        else:
+            self.night_times.jd_start = self.night_times.jd_evening18 + Config.STARTUP_TIME / 24.0
+            self.night_times.jd_end = self.night_times.jd_morning18 - Config.MIN_EXECUTION_TIME / 24.0
+        
+        # Calculate UT times (simplified - should account for time zone properly)
+        self.night_times.ut_start = (self.night_times.jd_start - int(self.night_times.jd_start - 0.5) - 0.5) * 24.0
+        self.night_times.ut_end = (self.night_times.jd_end - int(self.night_times.jd_end - 0.5) - 0.5) * 24.0
+        
+        # Calculate LST times
+        self.night_times.lst_start = lst(self.night_times.jd_start, self.site.longitude)
+        self.night_times.lst_end = lst(self.night_times.jd_end, self.site.longitude)
+        
+        # Get moon position
+        moon_ra, moon_dec, illumination = moon_position(self.night_times.jd_start)
+        self.night_times.ra_moon = moon_ra
+        self.night_times.dec_moon = moon_dec
+        self.night_times.percent_moon = illumination
+    
+    def _wait_for_sunset(self):
+        """Wait until after sunset to begin observations"""
+        jd = get_jd()
+        
+        while jd < self.night_times.jd_sunset:
+            logger.info(f"Waiting for sunset... (JD {jd:.6f} < {self.night_times.jd_sunset:.6f})")
+            time.sleep(60)
+            jd = get_jd()
+        
+        if jd > self.night_times.jd_sunrise:
+            logger.info("Sun is already up, exiting")
+            sys.exit(0)
+        
+        logger.info("Sun is down, starting observation program")
+    
+    def _initialize_hardware(self) -> bool:
+        """Initialize camera and telescope hardware"""
+        # Check camera status
+        logger.info("Checking camera status")
+        rc, _ = update_camera_status(self.camera_status)
+        if rc != 0:
+            logger.error("Cannot update camera status")
+            return False
+        
+        logger.info("Camera is responding")
+        
+        # Initialize telescope offsets
+        logger.info("Initializing telescope offsets")
+        if init_telescope_offsets(self.telescope_status) != 0:
+            logger.warning("Problem initializing telescope offsets")
+        
+        # Check telescope status
+        logger.info("Checking telescope status")
+        if update_telescope_status(self.telescope_status) != 0:
+            logger.warning("Telescope status not yet available")
+            self.telescope_ready = False
+        else:
+            print_telescope_status(self.telescope_status)
+            self.telescope_ready = True
+        
+        return True
+    
+    def _update_telescope_and_weather(self):
+        """Update telescope and weather status"""
+        if update_telescope_status(self.telescope_status) != 0:
+            logger.warning("Cannot update telescope status")
+            self.bad_weather = True
+            self.telescope_ready = False
+        else:
+            self.telescope_ready = True
+            self.bad_weather = (self.telescope_status.dome_status != 1)
+            
+            if self.bad_weather and not self.stop_flag:
+                logger.info("Bad weather detected, stopping telescope")
+                stop_telescope()
+                self.stop_flag = True
+    
+    def _handle_pause(self, ut: float, jd: float):
+        """Handle pause state"""
+        logger.info(f"UT {ut:9.6f}: Observations paused")
+        
+        if self.telescope_ready:
+            if self.bad_weather and not self.stop_flag:
+                logger.info("Stowing telescope due to weather")
+                stow_telescope()
+                self.stow_flag = True
+                self.stop_flag = True
+            elif not self.stop_flag:
+                logger.info("Stopping telescope")
+                stop_telescope()
+                self.stop_flag = True
+    
+    def _check_new_fields(self, filename: str, jd: float):
+        """Check for and add new fields to the sequence"""
+        if not os.path.exists(filename):
+            return
+        
+        # Load new fields
+        new_fields = []
+        try:
+            with open(filename, 'r') as f:
+                # Parse new fields (simplified)
+                pass
+        except:
+            return
+        
+        # Add to sequence if any
+        # (Implementation would go here)
+    
+    def _open_output_files(self):
+        """Open output files for logging"""
+        try:
+            self.hist_file = open(Config.HISTORY_FILE, 'a')
+            self.sequence_file = open(Config.SELECTED_FIELDS_FILE, 'a')
+            self.log_file = open(Config.LOG_OBS_FILE, 'a')
+        except Exception as e:
+            logger.error(f"Failed to open output files: {e}")
+    
+    def _log_observation(self, field_obj: Field, jd: float):
+        """Log observation to file"""
+        if self.log_file:
+            obs_num = field_obj.n_done - 1
+            line = (f"{field_obj.ra:10.6f} {field_obj.dec:10.6f} "
+                   f"{field_obj.shutter} {field_obj.n_done} "
+                   f"{field_obj.expt * 3600:6.1f} "
+                   f"{field_obj.ha[obs_num]:10.6f} "
+                   f"{jd:11.6f} "
+                   f"{field_obj.actual_expt[obs_num] * 3600:10.6f} "
+                   f"{field_obj.filenames[obs_num]} "
+                   f"# Field {field_obj.field_number}\n")
+            self.log_file.write(line)
+            self.log_file.flush()
+    
+    def _print_history(self, jd: float):
+        """Print observation history line"""
+        if self.hist_file:
+            line = f"{jd - 2450000:12.6f} "
+            for field_obj in self.fields:
+                if field_obj.n_done == field_obj.n_required:
+                    line += "."
+                else:
+                    line += str(field_obj.n_done)
+            line += "\n"
+            self.hist_file.write(line)
+            self.hist_file.flush()
+    
+    def _print_final_stats(self):
+        """Print final observation statistics"""
+        num_completed = sum(1 for f in self.fields if f.n_done == f.n_required)
+        num_observable = sum(1 for f in self.fields if f.doable)
+        
+        logger.info(f"Final statistics: {self.num_fields} fields loaded, "
+                   f"{num_observable} observable, {num_completed} completed")
+        
+        # Write completed fields to file
+        if self.sequence_file:
+            for field_obj in self.fields:
+                if field_obj.n_done == field_obj.n_required:
+                    self.sequence_file.write(field_obj.script_line + "\n")
+            self.sequence_file.flush()
     
     def load_sequence(self, filename: str) -> int:
-        """
-        Load observation sequence from file.
-        
-        Args:
-            filename: Path to sequence file
-        
-        Returns:
-            Number of fields loaded
-        """
+        """Load observation sequence from file"""
         self.fields = []
         self.num_fields = 0
         
@@ -754,7 +1168,26 @@ class Scheduler:
                         
                         field_obj.ra = float(parts[0])
                         field_obj.dec = float(parts[1])
-                        field_obj.shutter = get_shutter_code(parts[2])
+                        
+                        # Parse shutter code
+                        shutter_str = parts[2].upper()
+                        if shutter_str == 'Y':
+                            field_obj.shutter = ShutterCode.SKY
+                        elif shutter_str == 'N':
+                            field_obj.shutter = ShutterCode.DARK
+                        elif shutter_str == 'F':
+                            field_obj.shutter = ShutterCode.FOCUS
+                        elif shutter_str == 'O' or shutter_str == 'P':
+                            field_obj.shutter = ShutterCode.OFFSET
+                        elif shutter_str == 'E':
+                            field_obj.shutter = ShutterCode.EVENING_FLAT
+                        elif shutter_str == 'M':
+                            field_obj.shutter = ShutterCode.MORNING_FLAT
+                        elif shutter_str == 'L':
+                            field_obj.shutter = ShutterCode.DOME_FLAT
+                        else:
+                            field_obj.shutter = ShutterCode.BAD
+                        
                         field_obj.expt = float(parts[3]) / 3600.0  # Convert to hours
                         field_obj.interval = float(parts[4]) / 3600.0  # Convert to hours
                         field_obj.n_required = int(parts[5])
@@ -789,15 +1222,7 @@ class Scheduler:
             return -1
     
     def _validate_field(self, field_obj: Field) -> bool:
-        """
-        Validate field parameters.
-        
-        Args:
-            field_obj: Field object to validate
-        
-        Returns:
-            True if valid, False otherwise
-        """
+        """Validate field parameters"""
         if not (0.0 <= field_obj.ra <= 24.0):
             return False
         if not (-90.0 <= field_obj.dec <= 90.0):
@@ -813,13 +1238,26 @@ class Scheduler:
         
         return True
     
-    def save_obs_record(self, filename: Optional[str] = None):
-        """
-        Save observation record to binary file.
+    def load_site_params(self, site_name: str = "DEFAULT"):
+        """Load site parameters for the observatory"""
+        self.site.site_name = site_name
         
-        Args:
-            filename: Output filename (uses default if None)
-        """
+        # Default to La Silla observatory
+        if site_name == "DEFAULT" or site_name == "Fake":
+            self.site.longitude = 4.714  # West longitude in hours
+            self.site.latitude = -29.257  # degrees
+            self.site.elevation = 2347.0  # meters
+            self.site.elevation_sea = 2347.0
+            self.site.horizon = 0.0
+            self.site.std_timezone = 4.0  # Chile Standard Time
+            self.site.zone_name = "CLT"
+            self.site.zone_abbr = "C"
+            self.site.use_dst = 0
+        
+        logger.info(f"Loaded site parameters for {site_name}")
+    
+    def save_obs_record(self, filename: Optional[str] = None):
+        """Save observation record to binary file"""
         filename = filename or Config.OBS_RECORD_FILE
         
         try:
@@ -827,7 +1265,7 @@ class Scheduler:
                 # Save metadata
                 metadata = {
                     'num_fields': self.num_fields,
-                    'timestamp': datetime.now().isoformat(),
+                    'timestamp': datetime.now(timezone.utc).isoformat(),
                     'site': self.site.site_name,
                     'filter': self.filter_name,
                 }
@@ -836,21 +1274,13 @@ class Scheduler:
                 # Save fields
                 pickle.dump(self.fields, f)
                 
-            logger.info(f"Saved observation record to {filename}")
+            logger.debug(f"Saved observation record to {filename}")
         
         except Exception as e:
             logger.error(f"Error saving observation record: {e}")
     
     def load_obs_record(self, filename: Optional[str] = None) -> int:
-        """
-        Load observation record from binary file.
-        
-        Args:
-            filename: Input filename (uses default if None)
-        
-        Returns:
-            Number of fields loaded, or -1 on error
-        """
+        """Load observation record from binary file"""
         filename = filename or Config.OBS_RECORD_FILE
         
         if not os.path.exists(filename):
@@ -883,7 +1313,7 @@ class Scheduler:
     def cleanup(self):
         """Clean up resources and close files"""
         # Close file handles
-        for file_handle in [self.hist_file, self.sequence_file, self.log_file, self.obs_record_file]:
+        for file_handle in [self.hist_file, self.sequence_file, self.log_file]:
             if file_handle and not file_handle.closed:
                 file_handle.close()
         
@@ -891,50 +1321,48 @@ class Scheduler:
         self.save_obs_record()
         
         logger.info("Scheduler cleanup completed")
-    
-    def run(self, date: datetime, sequence_file: str):
-        """
-        Main scheduler execution loop.
-        
-        Args:
-            date: Local date for observations
-            sequence_file: Path to observation sequence file
-        """
-        logger.info(f"Starting scheduler for date {date.strftime('%Y-%m-%d')}")
-        logger.info(f"Sequence file: {sequence_file}")
-        
-        # Load or resume observations
-        num_fields = self.load_obs_record()
-        if num_fields <= 0:
-            num_fields = self.load_sequence(sequence_file)
-            if num_fields < 1:
-                logger.error("No valid fields to observe")
-                return
-        
-        # Initialize night times and field status
-        # (This would normally calculate astronomical times)
-        # ... implementation continues ...
-        
-        logger.info("Scheduler run completed")
 
 
 # ============================================================================
-# Example Usage
+# Main Entry Point
 # ============================================================================
 
 if __name__ == "__main__":
-    # Example usage
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Astronomical Observation Scheduler')
+    parser.add_argument('sequence_file', help='Observation sequence file')
+    parser.add_argument('year', type=int, help='Observation year')
+    parser.add_argument('month', type=int, help='Observation month')
+    parser.add_argument('day', type=int, help='Observation day')
+    parser.add_argument('verbose', type=int, help='Verbosity level (0-2)')
+    parser.add_argument('--fake', action='store_true', help='Run in simulation mode')
+    
+    args = parser.parse_args()
+    
+    # Configure for fake run if requested
+    if args.fake:
+        Config.FAKE_RUN = True
+    
+    # Set verbosity
+    if args.verbose > 0:
+        logging.getLogger().setLevel(logging.DEBUG)
+    
+    # Create scheduler
     scheduler = Scheduler()
     
     # Load site parameters
-    scheduler.load_site_params("DEFAULT")
+    scheduler.load_site_params("Fake" if Config.FAKE_RUN else "DEFAULT")
     
-    # Load observation sequence
-    if len(sys.argv) > 1:
-        sequence_file = sys.argv[1]
-    else:
-        sequence_file = "test_sequence.txt"
+    # Create observation date
+    obs_date = datetime(args.year, args.month, args.day)
     
-    # Run scheduler
-    observation_date = datetime.now()
-    scheduler.run(observation_date, sequence_file)
+    try:
+        # Run the observation loop
+        scheduler.run_observation_loop(args.sequence_file, obs_date)
+    except KeyboardInterrupt:
+        logger.info("Interrupted by user")
+    except Exception as e:
+        logger.error(f"Unhandled exception: {e}", exc_info=True)
+    finally:
+        scheduler.cleanup()
