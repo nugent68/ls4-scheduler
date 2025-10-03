@@ -19,10 +19,12 @@ An interactive script that prompts the user for a date and calculates sun and mo
   - All twilight times (civil, nautical, astronomical)
   - Dark sky duration
 - Complete moon calculations including:
-  - Moon position (RA, Dec)
+  - **Moon position at LOCAL MIDNIGHT (more relevant for nighttime observations)**
+  - Moon RA, Dec, and Local Sidereal Time at midnight
+  - Moon altitude, azimuth, and airmass at local midnight
   - Moon phase and illumination percentage
   - Moonrise and moonset times
-  - Moon altitude at both UT and local midnight
+  - Moon visibility during dark hours
 - Observing conditions summary
 - Local Sidereal Time calculations
 - Best objects to observe (by RA)
@@ -43,6 +45,7 @@ An automated test script that runs comprehensive tests on all functions without 
 
 **Features:**
 - **Dual time display for all rise/set calculations**
+- **Moon position calculated at local midnight for all tests**
 - Automatic timezone detection (CLT/CLST)
 - Tests for specific dates (including today's date)
 - Julian Date conversions
@@ -55,9 +58,10 @@ An automated test script that runs comprehensive tests on all functions without 
   - Circumpolar objects
   - Never-rising objects
   - Airmass calculations at various altitudes
-- Seasonal variations (solstices and equinoxes)
+- Seasonal variations (solstices and equinoxes) with moon phase
 - Atmospheric refraction corrections
 - Practical observing planning with object visibility
+- **Moon tracking through the night** - shows moon position every 2 hours
 
 **Usage:**
 ```bash
@@ -107,68 +111,59 @@ The scripts test the following functions from `scheduler_astro.py`:
 ### Interactive Script Output Example
 ```
 ======================================================================
-SUN CALCULATIONS FOR 2025-10-03
-======================================================================
-Time Zone: CLST (UTC-4)
-
-Twilight Times:
---------------------------------------------------
-Event                  UT Time      Local Time (CLST)
---------------------------------------------------
-Astronomical Dawn:     08:53 UT / 04:53 CLST
-Sunrise:               10:13 UT / 06:13 CLST
-Sunset:                22:41 UT / 18:41 CLST
-Astronomical Dusk:     00:01 UT / 20:01 CLST
-
-Dark Sky Duration: 8.87 hours
-Best Observing Window: 20:01 - 04:53 CLST
-                       (00:01 - 08:53 UT)
-
 MOON CALCULATIONS FOR 2025-10-03
 ======================================================================
-Moon Position at noon UT:
-  Illumination: 82.1%
+Moon Position at Local Midnight (00:00 CLST = 04:00 UT 2025-10-03):
+  RA:           22.25 hours
+  Dec:          -11.75 degrees
+  Illumination: 87.3%
   Phase:        Waning Crescent
+  LST:          0.17 hours
+  Altitude:     58.0°
+  Azimuth:      297.1°
+  Airmass:      1.179
 
 Moon Rise/Set Times:
 --------------------------------------------------
-Moonrise:              18:55 UT / 14:55 CLST
-Moonset:               08:05 UT / 04:05 CLST
+Moonrise:              19:38 UT / 15:38 CLST
+Moonset:               08:29 UT / 04:29 CLST
 
-Moon at Midnight:
-  UT Midnight (00:00 UT):
-    Altitude:     63.9°
-    Airmass:      1.113
-  Local Midnight (00:00 CLST):
-    Altitude:     54.0°
-    Airmass:      1.236
+OBSERVING CONDITIONS SUMMARY
+======================================================================
+Moon Interference: Poor (Near Full Moon)
+Moon visibility during dark hours: Yes
 ```
 
 ### Automated Script Output Example
 ```
-Testing Coordinate Transformations
-======================================================================
-Vega (α Lyrae):
-  RA:  18.6156 hours
-  Dec: 38.7836 degrees
-  Galactic l: 178.43°, b: 19.27°
+Moon at Local Midnight (00:00 CLST):
+  RA:       22.25 hours
+  Dec:      -11.75 degrees
+  Phase:    87.3%
+  Altitude: 58.0°
+  Azimuth:  297.1°
+  Airmass:  1.179
 
-Sun Rise/Set (UT / CLST):
-  Sunrise:  10:13 UT / 06:13 CLST
-  Sunset:   22:41 UT / 18:41 CLST
-
-Night Duration at Key Dates:
+Moon Tracking Through the Night
 ------------------------------------------------------------
-Date                      Dark Hours   Dusk (Local)    Dawn (Local)
+Local Time   UT Time    Altitude   Azimuth    Airmass
 ------------------------------------------------------------
-Spring Equinox             9.21 hours   20:09 CLST    05:22 CLST
-Winter Solstice           10.87 hours   20:13 CLT     07:06 CLT
-
-Object Visibility at Midnight (CLST):
---------------------------------------------------
-M42 (Orion Nebula)   Alt:  10.3°, Az:  90.4°, AM: 5.40
-LMC Center           Alt:  31.3°, Az: 156.6°, AM: 1.92
+20:00 CLST   00:00 UT     58.1°      65.1°     1.18
+22:00 CLST   02:00 UT     73.0°       1.1°     1.05
+00:00 CLST   04:00 UT     58.0°     297.1°     1.18
+02:00 CLST   06:00 UT     33.4°     275.8°     1.82
+04:00 CLST   08:00 UT      7.8°     262.0°     7.37
+06:00 CLST   10:00 UT   Below horizon
 ```
+
+## Key Changes in Moon Position Display
+
+The scripts now display **moon position at local midnight** instead of noon UT because:
+1. **More relevant for observations** - Astronomers need to know the moon's position during nighttime hours
+2. **Better planning** - Shows actual moon interference during observing hours
+3. **Practical altitude/azimuth** - Displays where the moon will be in the sky at midnight
+4. **Airmass calculation** - Provides airmass value for midnight, useful for exposure planning
+5. **LST at midnight** - Shows the Local Sidereal Time, helping identify which objects are at meridian
 
 ## Time Display Notes
 
@@ -176,6 +171,7 @@ LMC Center           Alt:  31.3°, Az: 156.6°, AM: 1.92
 2. The scripts automatically detect whether Chilean Standard Time (CLT) or Chilean Summer Time (CLST) applies
 3. When a time crosses midnight, it's marked with "(next day)" or "(prev day)" for clarity
 4. The automated script uses "-1" or "+1" notation for day boundaries in compact displays
+5. Moon position is specifically calculated for 00:00 local time (which is 04:00 UT for CLST or 03:00 UT for CLT)
 
 ## Requirements
 

@@ -137,14 +137,24 @@ def calculate_moon_times(year, month, day, tz_offset, tz_name):
     print(f"MOON CALCULATIONS FOR {year:04d}-{month:02d}-{day:02d}")
     print(f"{'='*70}")
     
-    # Calculate JD for noon of the given date
-    jd_noon = julian_date(year, month, day, 12, 0, 0)
+    # Calculate JD for local midnight (00:00 local time)
+    # Local midnight is at UTC + abs(tz_offset) hours
+    # For example, if tz_offset is -4, local midnight 00:00 is at 04:00 UT
+    jd_midnight_local = julian_date(year, month, day, 0, 0, 0) + 1 - tz_offset / 24.0
     jd_start = julian_date(year, month, day, 0, 0, 0)
     
-    # Get moon position and phase
-    moon_ra, moon_dec, illumination = moon_position(jd_noon)
+    # Get moon position at local midnight
+    moon_ra, moon_dec, illumination = moon_position(jd_midnight_local)
     
-    print(f"Moon Position at noon UT:")
+    # Calculate local midnight time in UT
+    midnight_ut_hour = -tz_offset  # e.g., -(-4) = 4 for CLST
+    if midnight_ut_hour >= 24:
+        midnight_ut_hour -= 24
+        midnight_date_str = f"{year:04d}-{month:02d}-{day+1:02d}"
+    else:
+        midnight_date_str = f"{year:04d}-{month:02d}-{day:02d}"
+    
+    print(f"Moon Position at Local Midnight (00:00 {tz_name} = {midnight_ut_hour:02d}:00 UT {midnight_date_str}):")
     print(f"  RA:           {moon_ra:.2f} hours")
     print(f"  Dec:          {moon_dec:.2f} degrees")
     print(f"  Illumination: {illumination:.1%}")
@@ -171,7 +181,22 @@ def calculate_moon_times(year, month, day, tz_offset, tz_name):
     
     print(f"  Phase:        {phase_name}")
     
-    # Calculate moon rise/set times
+    # Calculate LST at local midnight
+    lst_midnight = lst(jd_midnight_local, LA_SILLA_LONGITUDE)
+    print(f"  LST:          {lst_midnight:.2f} hours")
+    
+    # Calculate altitude and azimuth at local midnight
+    alt, az = altitude_azimuth(moon_ra, moon_dec, lst_midnight, LA_SILLA_LATITUDE)
+    print(f"  Altitude:     {alt:.1f}°")
+    print(f"  Azimuth:      {az:.1f}°")
+    if alt > 0:
+        am = airmass(alt)
+        print(f"  Airmass:      {am:.3f}")
+    else:
+        print(f"  Status:       Below horizon")
+    
+    # Calculate moon rise/set times (use noon JD for consistency with rise/set calculations)
+    jd_noon = julian_date(year, month, day, 12, 0, 0)
     rise_jd, set_jd = rise_set_times(moon_ra, moon_dec, jd_noon, 
                                      LA_SILLA_LONGITUDE, LA_SILLA_LATITUDE)
     
@@ -200,33 +225,6 @@ def calculate_moon_times(year, month, day, tz_offset, tz_name):
     else:
         print("Moon never rises above horizon")
     
-    # Calculate moon altitude at midnight (both UT and local)
-    jd_midnight_ut = julian_date(year, month, day, 0, 0, 0)
-    jd_midnight_local = jd_midnight_ut - tz_offset / 24.0
-    
-    # UT midnight
-    lst_midnight_ut = lst(jd_midnight_ut, LA_SILLA_LONGITUDE)
-    alt_ut, az_ut = altitude_azimuth(moon_ra, moon_dec, lst_midnight_ut, LA_SILLA_LATITUDE)
-    
-    # Local midnight
-    lst_midnight_local = lst(jd_midnight_local, LA_SILLA_LONGITUDE)
-    alt_local, az_local = altitude_azimuth(moon_ra, moon_dec, lst_midnight_local, LA_SILLA_LATITUDE)
-    
-    print(f"\nMoon at Midnight:")
-    print(f"  UT Midnight (00:00 UT):")
-    print(f"    Altitude:     {alt_ut:.1f}°")
-    print(f"    Azimuth:      {az_ut:.1f}°")
-    if alt_ut > 0:
-        am = airmass(alt_ut)
-        print(f"    Airmass:      {am:.3f}")
-    
-    print(f"  Local Midnight (00:00 {tz_name}):")
-    print(f"    Altitude:     {alt_local:.1f}°")
-    print(f"    Azimuth:      {az_local:.1f}°")
-    if alt_local > 0:
-        am = airmass(alt_local)
-        print(f"    Airmass:      {am:.3f}")
-    
     return moon_ra, moon_dec, illumination
 
 
@@ -238,7 +236,7 @@ def calculate_observing_conditions(year, month, day, twilight, moon_info, tz_off
     
     moon_ra, moon_dec, illumination = moon_info
     
-    # Determine overall conditions
+    # Determine overall conditions based on moon illumination
     if illumination < 0.25:
         moon_condition = "Excellent (Dark)"
     elif illumination < 0.50:
@@ -249,6 +247,25 @@ def calculate_observing_conditions(year, month, day, twilight, moon_info, tz_off
         moon_condition = "Poor (Near Full Moon)"
     
     print(f"Moon Interference: {moon_condition}")
+    
+    # Check if moon is up during the night
+    if 'astronomical_dusk' in twilight and 'astronomical_dawn' in twilight:
+        dusk_time = twilight['astronomical_dusk']
+        dawn_time = twilight['astronomical_dawn']
+        
+        # Get moon position at dusk and dawn
+        moon_ra_dusk, moon_dec_dusk, _ = moon_position(dusk_time)
+        lst_dusk = lst(dusk_time, LA_SILLA_LONGITUDE)
+        alt_dusk, _ = altitude_azimuth(moon_ra_dusk, moon_dec_dusk, lst_dusk, LA_SILLA_LATITUDE)
+        
+        moon_ra_dawn, moon_dec_dawn, _ = moon_position(dawn_time)
+        lst_dawn = lst(dawn_time, LA_SILLA_LONGITUDE)
+        alt_dawn, _ = altitude_azimuth(moon_ra_dawn, moon_dec_dawn, lst_dawn, LA_SILLA_LATITUDE)
+        
+        if alt_dusk > 0 or alt_dawn > 0:
+            print(f"Moon visibility during dark hours: Yes")
+        else:
+            print(f"Moon visibility during dark hours: No (below horizon)")
     
     # Best observing window
     if 'astronomical_dusk' in twilight and 'astronomical_dawn' in twilight:

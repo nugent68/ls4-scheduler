@@ -109,14 +109,29 @@ def test_specific_date(year, month, day):
             dark_hours += 24.0
         print(f"  Dark hours: {dark_hours:.2f}")
     
-    # Moon calculations
-    moon_ra, moon_dec, illumination = moon_position(jd_noon)
-    print(f"\nMoon:")
+    # Moon calculations at local midnight
+    jd_midnight_local = julian_date(year, month, day, 0, 0, 0) + 1 - tz_offset / 24.0
+    moon_ra, moon_dec, illumination = moon_position(jd_midnight_local)
+    
+    # Calculate LST at local midnight
+    lst_midnight = lst(jd_midnight_local, LA_SILLA_LONGITUDE)
+    
+    # Calculate altitude at local midnight
+    alt, az = altitude_azimuth(moon_ra, moon_dec, lst_midnight, LA_SILLA_LATITUDE)
+    
+    print(f"\nMoon at Local Midnight (00:00 {tz_name}):")
     print(f"  RA:       {moon_ra:.2f} hours")
     print(f"  Dec:      {moon_dec:.2f} degrees")
     print(f"  Phase:    {illumination:.1%}")
+    print(f"  Altitude: {alt:.1f}°")
+    print(f"  Azimuth:  {az:.1f}°")
+    if alt > 0:
+        am = airmass(alt)
+        print(f"  Airmass:  {am:.3f}")
+    else:
+        print(f"  Status:   Below horizon")
     
-    # Moon rise/set
+    # Moon rise/set (use noon JD for consistency)
     rise_jd, set_jd = rise_set_times(moon_ra, moon_dec, jd_noon,
                                      LA_SILLA_LONGITUDE, LA_SILLA_LATITUDE)
     if rise_jd and set_jd:
@@ -219,10 +234,10 @@ def test_multiple_dates():
         (2025, 12, 21, "Summer Solstice (Southern)")
     ]
     
-    print("\nNight Duration and Times at Key Dates:")
-    print("-" * 60)
-    print(f"{'Date':<25s} {'Dark Hours':<12s} {'Dusk (Local)':<15s} {'Dawn (Local)'}")
-    print("-" * 60)
+    print("\nNight Duration and Moon Phase at Key Dates:")
+    print("-" * 70)
+    print(f"{'Date':<25s} {'Dark Hours':<12s} {'Moon Phase':<15s} {'Moon Alt@Mid'}")
+    print("-" * 70)
     
     for year, month, day, description in test_dates:
         jd_noon = julian_date(year, month, day, 12, 0, 0)
@@ -232,16 +247,28 @@ def test_multiple_dates():
         tz_offset = get_chile_offset(month)
         tz_name = "CLST" if tz_offset == -4 else "CLT"
         
+        # Calculate moon at local midnight
+        jd_midnight_local = julian_date(year, month, day, 0, 0, 0) + 1 - tz_offset / 24.0
+        moon_ra, moon_dec, illumination = moon_position(jd_midnight_local)
+        lst_midnight = lst(jd_midnight_local, LA_SILLA_LONGITUDE)
+        alt, _ = altitude_azimuth(moon_ra, moon_dec, lst_midnight, LA_SILLA_LATITUDE)
+        
         if 'astronomical_dawn' in twilight and 'astronomical_dusk' in twilight:
             dark_hours = (twilight['astronomical_dawn'] - twilight['astronomical_dusk']) * 24.0
             if dark_hours < 0:
                 dark_hours += 24.0
             
-            # Get local times
-            dusk_ut, dusk_local = format_time_with_local(twilight['astronomical_dusk'], tz_offset)
-            dawn_ut, dawn_local = format_time_with_local(twilight['astronomical_dawn'], tz_offset)
+            # Determine moon phase name
+            if illumination < 0.25:
+                phase = "Dark"
+            elif illumination < 0.75:
+                phase = "Quarter"
+            else:
+                phase = "Full"
             
-            print(f"  {description:25s} {dark_hours:5.2f} hours   {dusk_local:6s} {tz_name}    {dawn_local:6s} {tz_name}")
+            alt_str = f"{alt:5.1f}°" if alt > 0 else "Below"
+            
+            print(f"  {description:25s} {dark_hours:5.2f} hours   {illumination:4.0%} ({phase:7s})   {alt_str}")
 
 
 def test_observing_planning():
@@ -283,21 +310,31 @@ def test_observing_planning():
         
         print(f"\nLST Range: {lst_start:.2f}h - {lst_end:.2f}h")
         
+        # Moon info at local midnight
+        jd_midnight_local = julian_date(year, month, day, 0, 0, 0) + 1 - tz_offset / 24.0
+        moon_ra, moon_dec, illumination = moon_position(jd_midnight_local)
+        lst_midnight = lst(jd_midnight_local, LA_SILLA_LONGITUDE)
+        moon_alt, moon_az = altitude_azimuth(moon_ra, moon_dec, lst_midnight, LA_SILLA_LATITUDE)
+        
+        print(f"\nMoon at Local Midnight:")
+        print(f"  Illumination: {illumination:.0%}")
+        if moon_alt > 0:
+            print(f"  Position: Alt {moon_alt:.1f}°, Az {moon_az:.1f}°")
+        else:
+            print(f"  Position: Below horizon")
+        
         # Test visibility of some sample objects
         test_objects = [
             ("M42 (Orion Nebula)", 5.583, -5.383),
             ("M31 (Andromeda)", 0.712, 41.269),
             ("Omega Centauri", 13.446, -47.479),
             ("LMC Center", 5.392, -69.756),
-            ("SMC Center", 0.877, -72.829)
+            ("SMC Center", 0.877, -72.829),
+            ("Galactic Center", 17.761, -29.008)
         ]
         
-        print(f"\nObject Visibility at Midnight ({tz_name}):")
+        print(f"\nObject Visibility at Local Midnight (00:00 {tz_name}):")
         print("-" * 50)
-        
-        # Calculate local midnight JD
-        jd_midnight_local = julian_date(year, month, day, 0, 0, 0) + 1 - tz_offset / 24.0
-        lst_midnight = lst(jd_midnight_local, LA_SILLA_LONGITUDE)
         
         for name, ra, dec in test_objects:
             alt, az = altitude_azimuth(ra, dec, lst_midnight, LA_SILLA_LATITUDE)
@@ -307,6 +344,48 @@ def test_observing_planning():
             else:
                 status = "Below horizon"
             print(f"  {name:20s} {status}")
+
+
+def test_moon_tracking():
+    """Test moon position throughout a night"""
+    print(f"\n{'='*70}")
+    print("Testing Moon Tracking Through the Night")
+    print(f"{'='*70}")
+    
+    year, month, day = 2025, 10, 3
+    tz_offset = get_chile_offset(month)
+    tz_name = "CLST" if tz_offset == -4 else "CLT"
+    
+    print(f"\nMoon Position Every 2 Hours on {year:04d}-{month:02d}-{day:02d}:")
+    print("-" * 60)
+    print(f"{'Local Time':<12s} {'UT Time':<10s} {'Altitude':<10s} {'Azimuth':<10s} {'Airmass'}")
+    print("-" * 60)
+    
+    # Track moon from 20:00 to 06:00 local time
+    for local_hour in [20, 22, 0, 2, 4, 6]:
+        # Calculate JD for this local time
+        if local_hour < 12:
+            # After midnight, next day
+            jd_time = julian_date(year, month, day + 1, local_hour - tz_offset, 0, 0)
+        else:
+            # Evening, same day
+            jd_time = julian_date(year, month, day, local_hour - tz_offset, 0, 0)
+        
+        # Get moon position
+        moon_ra, moon_dec, _ = moon_position(jd_time)
+        lst_time = lst(jd_time, LA_SILLA_LONGITUDE)
+        alt, az = altitude_azimuth(moon_ra, moon_dec, lst_time, LA_SILLA_LATITUDE)
+        
+        # Format times
+        local_str = f"{local_hour:02d}:00 {tz_name}"
+        ut_hour = (local_hour - tz_offset) % 24
+        ut_str = f"{ut_hour:02d}:00 UT"
+        
+        if alt > 0:
+            am = airmass(alt)
+            print(f"  {local_str:<12s} {ut_str:<10s} {alt:6.1f}°    {az:6.1f}°    {am:5.2f}")
+        else:
+            print(f"  {local_str:<12s} {ut_str:<10s} Below horizon")
 
 
 def main():
@@ -334,6 +413,9 @@ def main():
     
     # Test observing planning
     test_observing_planning()
+    
+    # Test moon tracking
+    test_moon_tracking()
     
     print("\n" + "="*70)
     print(" All tests completed successfully!")
